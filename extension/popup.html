@@ -8,70 +8,90 @@
   </head>
   <body>
     <main>
-      <h1>TrialShield</h1>
-      <p class="subtitle">Analyze trial risk, protect with a simulated card, and record evidence.</p>
+      <header class="topbar">
+        <div>
+          <h1>TrialShield</h1>
+          <p class="subtitle">Trial risk, protection, and evidence in one flow.</p>
+        </div>
+        <span id="risk-pill" class="risk-pill muted">—</span>
+      </header>
 
-      <section id="monitor" class="monitor">
-        <div class="monitor-header">
-          <p id="monitor-page-type" class="current-page">Current page: —</p>
+      <section id="monitor" class="card compact">
+        <div class="section-head">
+          <h2>Live page</h2>
           <span id="monitor-status" class="monitor-status">
             <span id="monitor-dot" class="dot dot-idle" aria-hidden="true"></span>
-            <span id="monitor-status-text">Not monitored yet</span>
+            <span id="monitor-status-text">Idle</span>
           </span>
         </div>
 
+        <p id="monitor-page-type" class="current-page">Current page: —</p>
+
+        <div class="signal-grid">
+          <div>
+            <span>Trial</span>
+            <strong id="monitor-trial">—</strong>
+          </div>
+          <div>
+            <span>Payment</span>
+            <strong id="monitor-payment">—</strong>
+          </div>
+          <div>
+            <span>Renewal</span>
+            <strong id="monitor-renewal">—</strong>
+          </div>
+          <div>
+            <span>Cancel</span>
+            <strong id="monitor-cancellation">—</strong>
+          </div>
+        </div>
+
         <ul id="monitor-alerts" class="alerts" aria-live="polite"></ul>
-
-        <dl class="monitor-grid">
-          <dt>Plan</dt>
-          <dd id="monitor-plan">No plan information yet</dd>
-
-          <dt>Trial</dt>
-          <dd id="monitor-trial">No trial information yet</dd>
-
-          <dt>Payment</dt>
-          <dd id="monitor-payment">No payment information yet</dd>
-
-          <dt>Renewal</dt>
-          <dd id="monitor-renewal">No renewal information yet</dd>
-
-          <dt>Cancellation</dt>
-          <dd id="monitor-cancellation">No cancellation flow observed yet</dd>
-        </dl>
-
-        <p id="monitor-lastscan" class="status"></p>
+        <p id="monitor-plan" class="minor-line">Plan: unknown</p>
+        <p id="monitor-lastscan" class="minor-line"></p>
       </section>
 
-      <form id="search-form" role="search">
-        <label for="search-input">Search free trials with Gemini</label>
+      <form id="search-form" class="card compact" role="search">
+        <label for="search-input">Find trial pages</label>
         <div class="search-row">
           <input
             id="search-input"
             type="search"
-            placeholder="Try music, design, streaming..."
+            placeholder="music, design, fitness..."
             autocomplete="off"
           />
           <button type="submit">Search</button>
         </div>
+        <p id="result-count" class="status" aria-live="polite"></p>
+        <ul id="results" class="results"></ul>
       </form>
 
-      <p id="result-count" class="status" aria-live="polite"></p>
-      <ul id="results" class="results"></ul>
+      <section id="trial-details" class="card" hidden>
+        <div class="section-head">
+          <h2>Analysis</h2>
+          <span id="analysis-score" class="score-text">Scanning…</span>
+        </div>
 
-      <section id="trial-details" class="details" hidden>
-        <h2>Page analysis</h2>
         <p id="analysis-status" class="status">Analyzing page…</p>
-        <dl id="details-list"></dl>
 
-        <button id="protect-trial" class="protect-button" type="button" hidden>
-          Protect this trial
-        </button>
+        <div id="summary-grid" class="summary-grid"></div>
+        <ul id="warning-list" class="warning-list"></ul>
 
-        <button id="cancel-trial" class="danger-button" type="button" hidden>
-          Try automatic cancellation
-        </button>
+        <div class="action-row">
+          <button id="protect-trial" class="protect-button" type="button" hidden>
+            Protect
+          </button>
+          <button id="cancel-trial" class="danger-button" type="button" hidden>
+            Auto-cancel
+          </button>
+        </div>
 
         <p id="protection-status" class="status" aria-live="polite"></p>
+
+        <details id="technical-details" class="technical-details">
+          <summary>Evidence and technical details</summary>
+          <dl id="details-list"></dl>
+        </details>
 
         <section id="audit-panel" class="audit-panel" hidden>
           <h2>Evidence log</h2>

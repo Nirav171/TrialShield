@@ -7,6 +7,10 @@ const resultCount = document.querySelector("#result-count");
 
 const details = document.querySelector("#trial-details");
 const analysisStatus = document.querySelector("#analysis-status");
+const analysisScore = document.querySelector("#analysis-score");
+const riskPill = document.querySelector("#risk-pill");
+const summaryGrid = document.querySelector("#summary-grid");
+const warningList = document.querySelector("#warning-list");
 const detailsList = document.querySelector("#details-list");
 const protectTrialButton = document.querySelector("#protect-trial");
 const cancelTrialButton = document.querySelector("#cancel-trial");
@@ -21,6 +25,32 @@ let protectedTrialId = null;
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
+}
+
+function hostnameFromUrl(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+async function getStorageKeyForCurrentTab() {
+  const tab = await activeTab();
+  if (!tab?.id) return null;
+  return `trialshield_trial_for_tab:${tab.id}`;
+}
+
+async function restoreProtectedTrialId() {
+  const key = await getStorageKeyForCurrentTab();
+  if (!key) return;
+
+  const stored = await chrome.storage.local.get([key, "trialshield_latest_trial_id"]).catch(() => ({}));
+  protectedTrialId = stored[key] || stored.trialshield_latest_trial_id || null;
+
+  if (protectedTrialId) {
+    cancelTrialButton.hidden = false;
+  }
 }
 
 async function postJson(path, body) {
@@ -44,11 +74,30 @@ async function postJson(path, body) {
   return payload;
 }
 
+async function getJson(path) {
+  const response = await fetch(`${API_BASE}${path}`);
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(payload?.detail || `Request failed with status ${response.status}`);
+  }
+
+  return payload;
+}
+
+function sourceLabel(source) {
+  if (!source) return "unknown";
+  if (source.startsWith("gemini:")) return "Gemini";
+  if (source === "fallback:no_api_key") return "offline fallback: no Gemini key";
+  if (source.startsWith("fallback:")) return "offline fallback";
+  return source;
+}
+
 function renderResults(items, query, source) {
   results.replaceChildren();
   resultCount.textContent = items.length
-    ? `${items.length} trials found for "${query}" (${source}).`
-    : `No trials found for "${query}".`;
+    ? `${items.length} results for "${query}" · ${sourceLabel(source)}`
+    : `No results found for "${query}".`;
 
   for (const trial of items) {
     const item = document.createElement("li");
@@ -80,15 +129,15 @@ form.addEventListener("submit", async (event) => {
 
   const query = input.value.trim();
   if (!query) {
-    resultCount.textContent = "Enter the type of free trial you want to find.";
+    resultCount.textContent = "Enter a category first.";
     results.replaceChildren();
     return;
   }
 
   const button = form.querySelector("button");
   button.disabled = true;
-  button.textContent = "Searching...";
-  resultCount.textContent = "Asking Gemini for official trial pages...";
+  button.textContent = "Searching";
+  resultCount.textContent = "Finding official trial pages…";
   results.replaceChildren();
 
   try {
@@ -96,13 +145,25 @@ form.addEventListener("submit", async (event) => {
     renderResults(payload.results || [], query, payload.source || "unknown");
   } catch (error) {
     resultCount.textContent = error instanceof TypeError
-      ? "FastAPI is offline. Start it on port 8000."
+      ? "FastAPI is offline on port 8000."
       : error.message;
   } finally {
     button.disabled = false;
     button.textContent = "Search";
   }
 });
+
+function setRisk(score, level) {
+  const text = Number.isFinite(score) ? `${score}/100` : "—";
+  riskPill.textContent = text;
+  analysisScore.textContent = level ? `${text} · ${level}` : text;
+
+  riskPill.className = "risk-pill";
+  if (score >= 80) riskPill.classList.add("critical");
+  else if (score >= 60) riskPill.classList.add("high");
+  else if (score >= 30) riskPill.classList.add("medium");
+  else riskPill.classList.add("low");
+}
 
 function addDetail(label, value) {
   if (value === null || value === undefined || value === "" || value === false) return;
@@ -118,8 +179,39 @@ function addDetail(label, value) {
   detailsList.append(term, description);
 }
 
+function addSummary(label, value, tone = "neutral") {
+  const item = document.createElement("div");
+  item.className = `summary-card ${tone}`;
+
+  const small = document.createElement("span");
+  const strong = document.createElement("strong");
+
+  small.textContent = label;
+  strong.textContent = value || "Unknown";
+
+  item.append(small, strong);
+  summaryGrid.append(item);
+}
+
+function renderWarnings(warnings, flags) {
+  warningList.replaceChildren();
+
+  const items = [
+    ...(warnings || []).slice(0, 3),
+    ...(flags || []).slice(0, 3).map((flag) => flag.label)
+  ];
+
+  for (const item of [...new Set(items)].slice(0, 4)) {
+    const li = document.createElement("li");
+    li.textContent = item;
+    warningList.append(li);
+  }
+}
+
 function renderBackendAnalysis(state) {
   details.hidden = false;
+  summaryGrid.replaceChildren();
+  warningList.replaceChildren();
   detailsList.replaceChildren();
   auditList.replaceChildren();
   auditPanel.hidden = true;
@@ -127,25 +219,39 @@ function renderBackendAnalysis(state) {
   analyzedTrial = null;
   analyzedRiskScore = 0;
   protectTrialButton.hidden = true;
-  cancelTrialButton.hidden = true;
   protectionStatus.textContent = "";
 
   if (state.status === "error") {
+    setRisk(NaN, null);
     analysisStatus.textContent = `Analysis failed: ${state.error}`;
     return;
   }
 
   const payload = state.result;
   const trial = payload.trial;
-  analyzedTrial = trial;
-  analyzedRiskScore = payload.risk?.score || 0;
-  protectTrialButton.hidden = false;
+  const risk = payload.risk;
 
-  analysisStatus.textContent = payload.risk
-    ? `Risk: ${payload.risk.score}/100 (${payload.risk.level}). ${payload.risk.summary}`
-    : "Analysis complete.";
+  analyzedTrial = trial;
+  analyzedRiskScore = risk?.score || 0;
+
+  setRisk(analyzedRiskScore, risk?.level);
+  protectTrialButton.hidden = false;
+  cancelTrialButton.hidden = !protectedTrialId;
+
+  analysisStatus.textContent = risk?.summary || "Analysis complete.";
+
+  addSummary("Provider", trial.provider_name);
+  addSummary("Trial", trial.trial_duration || (trial.has_free_trial ? "Detected" : "Unclear"), trial.has_free_trial ? "ok" : "warn");
+  addSummary("Payment", trial.payment_method_required === true ? "Required" : trial.payment_method_required === false ? "Not required" : "Unclear", trial.payment_method_required === true ? "warn" : "neutral");
+  addSummary("Renewal", trial.auto_renews === true ? "Auto-renews" : trial.auto_renews === false ? "No auto-renew" : "Unclear", trial.auto_renews === true ? "warn" : "neutral");
+  addSummary("Charge", trial.recurring_charge || trial.minimum_fee || "Unknown", trial.recurring_charge ? "warn" : "neutral");
+  addSummary("Evidence", `${trial.evidence?.length || 0} snippets`, trial.evidence?.length ? "ok" : "warn");
+
+  renderWarnings(payload.warnings, payload.evidence_flags);
 
   addDetail("Provider", trial.provider_name);
+  addDetail("Page title", trial.page_title);
+  addDetail("URL", trial.source_url);
   addDetail("Free trial", trial.has_free_trial ? "Yes" : "Not confirmed");
   addDetail("Duration", trial.trial_duration);
   addDetail("Starting fee", trial.minimum_fee);
@@ -155,30 +261,26 @@ function renderBackendAnalysis(state) {
   addDetail("Cancellation terms", trial.cancellation_terms);
   addDetail("Completeness", `${payload.completeness_score}%`);
   addDetail("Warnings", payload.warnings);
-  addDetail(
-    "Risk factors",
-    payload.risk?.factors?.map((factor) => `${factor.label} (+${factor.points})`)
-  );
-  addDetail(
-    "Evidence flags",
-    payload.evidence_flags?.map((flag) => `${flag.label}: ${flag.explanation}`)
-  );
+  addDetail("Risk factors", risk?.factors?.map((factor) => `${factor.label} (+${factor.points})`));
+  addDetail("Evidence flags", payload.evidence_flags?.map((flag) => `${flag.label}: ${flag.explanation}`));
   addDetail("Evidence", trial.evidence);
 }
 
 async function analyzeActivePage() {
   const tab = await activeTab();
+
   if (!tab?.id || !/^https?:/.test(tab.url || "")) {
     details.hidden = false;
-    analysisStatus.textContent = "Open a normal http(s) website to analyze it.";
+    analysisStatus.textContent = "Open a normal website to analyze it.";
     return;
   }
 
   details.hidden = false;
-  analysisStatus.textContent = "Analyzing this page with FastAPI...";
+  analysisStatus.textContent = "Scanning current page…";
 
   try {
     let response;
+
     try {
       response = await chrome.tabs.sendMessage(tab.id, { type: "TRIALSHIELD_ANALYZE" });
     } catch {
@@ -203,7 +305,7 @@ async function analyzeActivePage() {
     });
   } catch (error) {
     const message = error instanceof TypeError
-      ? "FastAPI backend is offline. Start it on port 8000."
+      ? "FastAPI backend is offline on port 8000."
       : error instanceof Error
         ? error.message
         : "This page could not be analyzed.";
@@ -216,8 +318,8 @@ protectTrialButton.addEventListener("click", async () => {
   if (!analyzedTrial) return;
 
   protectTrialButton.disabled = true;
-  protectTrialButton.textContent = "Starting protection...";
-  protectionStatus.textContent = "Creating simulated card and audit evidence...";
+  protectTrialButton.textContent = "Protecting";
+  protectionStatus.textContent = "Creating simulated card and audit record…";
 
   try {
     const tab = await activeTab();
@@ -234,32 +336,61 @@ protectTrialButton.addEventListener("click", async () => {
     const result = response.result;
     protectedTrialId = result.trial_id;
 
+    const key = await getStorageKeyForCurrentTab();
+    if (key) {
+      await chrome.storage.local.set({
+        [key]: protectedTrialId,
+        trialshield_latest_trial_id: protectedTrialId
+      });
+    }
+
+    protectionStatus.textContent = result.message;
+    protectTrialButton.textContent = "Protected";
+    cancelTrialButton.hidden = false;
+
+    addSummary("Protected ID", String(result.trial_id), "ok");
+    addSummary("Card", result.card.status, "ok");
+
     addDetail("Trial ID", result.trial_id);
     addDetail("Simulated card number", result.card.card_number);
     addDetail("Expiry", `${String(result.card.expiry_month).padStart(2, "0")}/${result.card.expiry_year}`);
     addDetail("Simulated CVV", result.card.cvv);
     addDetail("Merchant lock", result.card.merchant_lock);
     addDetail("Card status", result.card.status);
-
-    protectionStatus.textContent = result.message;
-    protectTrialButton.textContent = "Protection started";
-    cancelTrialButton.hidden = false;
   } catch (error) {
     protectionStatus.textContent = error instanceof Error ? error.message : "Trial protection failed.";
     protectTrialButton.disabled = false;
-    protectTrialButton.textContent = "Protect this trial";
+    protectTrialButton.textContent = "Protect";
   }
 });
 
+async function renderAuditTrail(trialId, cancellation) {
+  auditPanel.hidden = false;
+  auditList.replaceChildren();
+
+  try {
+    const events = await getJson(`/trials/${trialId}/audit-events`);
+    for (const event of events.slice(-5)) {
+      const li = document.createElement("li");
+      li.textContent = `${event.event_type}: ${event.description}`;
+      auditList.append(li);
+    }
+  } catch {
+    const li = document.createElement("li");
+    li.textContent = `Actions: ${(cancellation.attempted_actions || []).join(" → ") || "None"}`;
+    auditList.append(li);
+  }
+}
+
 cancelTrialButton.addEventListener("click", async () => {
   if (!protectedTrialId) {
-    protectionStatus.textContent = "Protect the trial first so cancellation evidence can be linked.";
+    protectionStatus.textContent = "Protect the trial first so evidence can be linked.";
     return;
   }
 
   cancelTrialButton.disabled = true;
-  cancelTrialButton.textContent = "Attempting cancellation...";
-  protectionStatus.textContent = "Trying visible cancellation controls and recording evidence...";
+  cancelTrialButton.textContent = "Trying";
+  protectionStatus.textContent = "Trying visible cancellation controls…";
 
   try {
     const tab = await activeTab();
@@ -277,53 +408,30 @@ cancelTrialButton.addEventListener("click", async () => {
     const cancellation = response.cancellation;
 
     protectionStatus.textContent = result.message;
-    cancelTrialButton.textContent = result.confirmed
-      ? "Cancellation confirmed"
-      : "Fallback card freeze logged";
+    cancelTrialButton.textContent = result.confirmed ? "Confirmed" : "Fallback logged";
 
-    auditPanel.hidden = false;
-    auditList.replaceChildren();
+    addSummary("Cancel status", result.cancellation_status, result.confirmed ? "ok" : "warn");
+    addSummary("Card status", result.card_status || "Unknown", "warn");
 
-    const items = [
-      `Audit event #${result.audit_event_id}`,
-      `Status: ${result.status}`,
-      `Cancellation status: ${result.cancellation_status}`,
-      `Card status: ${result.card_status}`,
-      `Actions: ${(cancellation.attempted_actions || []).join(" → ") || "None"}`,
-      `Evidence: ${(cancellation.evidence || []).slice(0, 4).join(" | ") || "None"}`
-    ];
-
-    for (const text of items) {
-      const li = document.createElement("li");
-      li.textContent = text;
-      auditList.append(li);
-    }
+    await renderAuditTrail(protectedTrialId, cancellation);
   } catch (error) {
     protectionStatus.textContent = error instanceof Error
       ? error.message
       : "Automatic cancellation failed.";
     cancelTrialButton.disabled = false;
-    cancelTrialButton.textContent = "Try automatic cancellation";
+    cancelTrialButton.textContent = "Auto-cancel";
   }
 });
 
-function hostnameFromUrl(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return null;
-  }
-}
-
 function relativeTime(ts) {
-  if (!ts) return "No scans yet on this site.";
+  if (!ts) return "";
   const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
   if (seconds < 2) return "Last scan: just now";
-  if (seconds < 60) return `Last scan: ${seconds} seconds ago`;
+  if (seconds < 60) return `Last scan: ${seconds}s ago`;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `Last scan: ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  if (minutes < 60) return `Last scan: ${minutes}m ago`;
   const hours = Math.round(minutes / 60);
-  return `Last scan: ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return `Last scan: ${hours}h ago`;
 }
 
 async function renderMonitor() {
@@ -340,9 +448,10 @@ async function renderMonitor() {
 
   const tab = await activeTab();
   const hostname = hostnameFromUrl(tab?.url || "");
+
   if (!hostname) {
-    pageTypeEl.textContent = "Monitoring is unavailable on this page.";
-    statusText.textContent = "Not monitored";
+    pageTypeEl.textContent = "Monitoring unavailable.";
+    statusText.textContent = "Idle";
     return;
   }
 
@@ -353,19 +462,20 @@ async function renderMonitor() {
   if (!data) {
     pageTypeEl.textContent = "Current page: —";
     statusDot.className = "dot dot-idle";
-    statusText.textContent = "Not monitored yet";
+    statusText.textContent = "Idle";
     return;
   }
 
   pageTypeEl.textContent = `Current page: ${data.currentSite?.pageType || "unknown"}`;
   statusDot.className = "dot dot-active";
-  statusText.textContent = "Monitoring this website";
+  statusText.textContent = "Monitoring";
 
   alertsEl.replaceChildren();
+
   const alerts = [];
   if (data.payment?.methodRequired === true) alerts.push("Payment required");
-  if (data.renewal?.automatic === true) alerts.push("Auto-renewal detected");
-  if (data.cancellation?.stepsObserved > 0) alerts.push("Cancellation controls found");
+  if (data.renewal?.automatic === true) alerts.push("Auto-renewal");
+  if (data.cancellation?.stepsObserved > 0) alerts.push("Cancel controls found");
 
   for (const alert of alerts.slice(0, 3)) {
     const li = document.createElement("li");
@@ -374,24 +484,24 @@ async function renderMonitor() {
     alertsEl.append(li);
   }
 
-  planEl.textContent = data.plan?.status || "No plan information yet";
+  planEl.textContent = `Plan: ${data.plan?.status || "unknown"}`;
   trialEl.textContent = data.trial?.detected
-    ? `Free trial detected${data.trial.duration ? ` · ${data.trial.duration}` : ""}`
-    : "No trial detected";
+    ? data.trial.duration || "Detected"
+    : "No";
   paymentEl.textContent = data.payment?.methodRequired === true
-    ? "Payment method required"
+    ? "Required"
     : data.payment?.pageDetected
-      ? "Payment page detected"
-      : "No payment information yet";
+      ? "Seen"
+      : "Unknown";
   renewalEl.textContent = data.renewal?.automatic === true
-    ? `Auto-renews${data.renewal.price ? ` · ${data.renewal.price}` : ""}`
-    : "No renewal information yet";
+    ? data.renewal.price || "Yes"
+    : "Unknown";
   cancellationEl.textContent = data.cancellation?.stepsObserved
-    ? `${data.cancellation.stepsObserved} cancellation step(s) observed`
-    : "No cancellation flow observed yet";
+    ? `${data.cancellation.stepsObserved} step(s)`
+    : "None";
   lastScanEl.textContent = relativeTime(data.lastUpdated);
 }
 
-resultCount.textContent = "Search for music, design, fitness, streaming, or another service.";
-analyzeActivePage();
+resultCount.textContent = "Search for a free-trial category.";
+restoreProtectedTrialId().then(() => analyzeActivePage());
 renderMonitor();

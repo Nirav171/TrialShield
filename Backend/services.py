@@ -1,12 +1,9 @@
 """Business logic for TrialShield.
 
-This file is intentionally self-contained and robust for the hackathon demo.
-
-It supports:
-- Gemini-powered trial search through the official Gemini REST API
-- automatic Gemini model discovery through models.list
+Robust demo logic for:
+- Gemini-powered trial search with model discovery
 - protected-trial creation
-- simulated virtual-card creation
+- simulated merchant-locked card creation
 - audit/evidence logging
 - cancellation-result recording
 """
@@ -39,17 +36,8 @@ except ImportError:
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _GEMINI_MODEL_CACHE: str | None = None
 
+
 CURATED_FALLBACK_TRIALS = [
-    {
-        "name": "Canva Pro",
-        "url": "https://www.canva.com/pro/",
-        "description": "Official Canva Pro page with design-tool trial and plan information.",
-    },
-    {
-        "name": "Adobe Creative Cloud",
-        "url": "https://www.adobe.com/creativecloud/plans.html",
-        "description": "Official Adobe plans page for Creative Cloud subscriptions and trials.",
-    },
     {
         "name": "Spotify Premium",
         "url": "https://www.spotify.com/premium/",
@@ -63,7 +51,17 @@ CURATED_FALLBACK_TRIALS = [
     {
         "name": "YouTube Music Premium",
         "url": "https://www.youtube.com/musicpremium",
-        "description": "Official YouTube Music Premium page with music subscription details.",
+        "description": "Official YouTube Music Premium page with subscription details.",
+    },
+    {
+        "name": "Canva Pro",
+        "url": "https://www.canva.com/pro/",
+        "description": "Official Canva Pro page with design-tool trial and plan information.",
+    },
+    {
+        "name": "Adobe Creative Cloud",
+        "url": "https://www.adobe.com/creativecloud/plans.html",
+        "description": "Official Adobe plans page for Creative Cloud subscriptions and trials.",
     },
 ]
 
@@ -95,13 +93,11 @@ def _env_value(name: str) -> str | None:
     backend_dir = Path(__file__).resolve().parent
     repo_root = backend_dir.parent
 
-    candidate_files = [
+    for file_path in [
         backend_dir / ".env",
         repo_root / ".env",
         repo_root / "extension" / ".env",
-    ]
-
-    for file_path in candidate_files:
+    ]:
         value = _read_env_file(file_path).get(name)
         if value:
             return value.strip().strip('"').strip("'")
@@ -135,20 +131,14 @@ def _gemini_request(
     payload: dict[str, Any] | None = None,
     timeout: int = 25,
 ) -> dict[str, Any]:
-    if path_or_url.startswith("http"):
-        url = path_or_url
-    else:
-        url = f"{GEMINI_API_BASE}{path_or_url}"
+    url = path_or_url if path_or_url.startswith("http") else f"{GEMINI_API_BASE}{path_or_url}"
 
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": api_key,
     }
 
-    data = None
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = Request(url, data=data, headers=headers, method=method)
 
     with urlopen(request, timeout=timeout) as response:
@@ -177,26 +167,23 @@ def _list_gemini_models(api_key: str) -> list[dict[str, Any]]:
 def _model_priority(model_name: str) -> tuple[int, str]:
     name = model_name.lower()
 
-    if "embedding" in name or "aqa" in name or "imagen" in name:
-        return (-100, name)
+    if any(blocked in name for blocked in ["embedding", "aqa", "imagen", "image", "tts"]):
+        return (-1000, name)
 
     score = 0
-
     if "flash" in name:
         score += 1000
     if "lite" in name:
-        score += 100
+        score += 150
     if "pro" in name:
         score += 50
 
-    # Prefer newer families when the key has access to them.
     version_match = re.search(r"gemini-(\d+)(?:\.(\d+))?", name)
     if version_match:
         major = int(version_match.group(1))
         minor = int(version_match.group(2) or "0")
         score += major * 100 + minor * 10
 
-    # Avoid preview/experimental aliases unless nothing better exists.
     if "preview" in name:
         score -= 20
     if "exp" in name or "experimental" in name:
@@ -208,42 +195,37 @@ def _model_priority(model_name: str) -> tuple[int, str]:
 
 
 def get_available_gemini_model(api_key: str) -> str:
-    """Return one model name that this API key can actually use.
-
-    Important: do not hardcode Gemini model names. Google may retire aliases.
-    The Gemini API tells callers to use models.list and check
-    supportedGenerationMethods.
-    """
-
     global _GEMINI_MODEL_CACHE
 
     if _GEMINI_MODEL_CACHE:
         return _GEMINI_MODEL_CACHE
 
-    models = _list_gemini_models(api_key)
-
     candidates: list[str] = []
-    for model in models:
+
+    for model in _list_gemini_models(api_key):
         name = str(model.get("name") or "").strip()
-        supported_methods = model.get("supportedGenerationMethods") or []
+        methods = model.get("supportedGenerationMethods") or []
         if not name:
             continue
-        if "generateContent" not in supported_methods:
+        if "generateContent" not in methods:
             continue
-        if "embedding" in name.lower():
+        if _model_priority(name)[0] < 0:
             continue
         candidates.append(name)
 
     if not candidates:
-        raise RuntimeError(
-            "Gemini API key is valid, but no model supporting generateContent "
-            "was returned by models.list."
-        )
+        raise RuntimeError("No Gemini model supporting generateContent is available for this API key.")
 
     candidates.sort(key=_model_priority, reverse=True)
     _GEMINI_MODEL_CACHE = candidates[0]
     print(f"TrialShield Gemini model selected: {_GEMINI_MODEL_CACHE}")
     return _GEMINI_MODEL_CACHE
+
+
+def _model_generate_path(model_name: str) -> str:
+    if model_name.startswith("models/"):
+        return f"/{model_name}:generateContent"
+    return f"/models/{model_name}:generateContent"
 
 
 def extract_domain(url: str) -> str:
@@ -255,11 +237,7 @@ def extract_domain(url: str) -> str:
 
 def parse_trial_days(trial_duration: str | None) -> int:
     text = trial_duration or ""
-    match = re.search(
-        r"(\d+)\s*(day|week|month)s?\b",
-        text,
-        re.IGNORECASE,
-    )
+    match = re.search(r"(\d+)\s*(day|week|month)s?\b", text, re.IGNORECASE)
     if not match:
         return 7
 
@@ -309,15 +287,12 @@ def _passes_luhn_check(number: str) -> bool:
 
 def generate_card_number(db: Session) -> str:
     for _ in range(100):
-        # Starts with 9 and deliberately fails Luhn so it is visibly demo-only.
         number = "9" + "".join(secrets.choice("0123456789") for _ in range(15))
 
         if _passes_luhn_check(number):
             number = number[:-1] + str((int(number[-1]) + 1) % 10)
 
-        exists = db.scalar(
-            select(VirtualCard.id).where(VirtualCard.card_number == number)
-        )
+        exists = db.scalar(select(VirtualCard.id).where(VirtualCard.card_number == number))
         if exists is None:
             return number
 
@@ -394,10 +369,7 @@ def create_protected_trial(
     try:
         merchant = db.scalar(select(Merchant).where(Merchant.domain == merchant_domain))
         if merchant is None:
-            merchant = Merchant(
-                name=request.provider_name.strip(),
-                domain=merchant_domain,
-            )
+            merchant = Merchant(name=request.provider_name.strip(), domain=merchant_domain)
             db.add(merchant)
             db.flush()
         else:
@@ -462,7 +434,7 @@ def create_protected_trial(
 
 
 def analyze_evidence_texts(evidence: list[str]) -> list[EvidenceFlag]:
-    joined = "\n".join(evidence or "")
+    joined = "\n".join(str(item) for item in (evidence or []) if item)
     flags: list[EvidenceFlag] = []
 
     checks = [
@@ -547,7 +519,6 @@ def record_cancellation_attempt(
 
         card = db.scalar(select(VirtualCard).where(VirtualCard.trial_id == trial_id))
         merchant = db.get(Merchant, trial.merchant_id)
-
         confirmed = _looks_cancelled(request)
 
         if confirmed:
@@ -574,9 +545,7 @@ def record_cancellation_attempt(
                 "Automatic cancellation could not confirm success; simulated card "
                 "was frozen as fallback protection."
             )
-            message = (
-                "Cancellation was not confirmed. The simulated card was frozen as fallback."
-            )
+            message = "Cancellation was not confirmed. The simulated card was frozen as fallback."
 
         event = AuditEvent(
             trial_id=trial.id,
@@ -594,10 +563,12 @@ def record_cancellation_attempt(
                 "card_frozen": card is not None and card.status == "frozen",
             },
         )
+
         db.add(event)
         db.commit()
         db.refresh(event)
         db.refresh(trial)
+
         if card is not None:
             db.refresh(card)
 
@@ -616,16 +587,47 @@ def record_cancellation_attempt(
         raise
 
 
-def _safe_json_from_gemini_text(text: str) -> dict[str, Any]:
+def _extract_json_object(text: str) -> dict[str, Any]:
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned)
-    return json.loads(cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(cleaned[start : end + 1])
+
+
+def _gemini_text(response_json: dict[str, Any]) -> str:
+    candidates = response_json.get("candidates") or []
+    for candidate in candidates:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = part.get("text")
+            if text:
+                return str(text)
+    return ""
 
 
 def _validate_search_results(items: list[dict[str, Any]]) -> list[dict[str, str]]:
     clean: list[dict[str, str]] = []
     seen_hosts: set[str] = set()
+
+    blocked_hosts = [
+        "google.",
+        "bing.",
+        "duckduckgo.",
+        "reddit.",
+        "facebook.com",
+        "x.com",
+        "twitter.com",
+        "t.co",
+        "bit.ly",
+    ]
 
     for item in items:
         name = str(item.get("name") or "").strip()
@@ -637,25 +639,8 @@ def _validate_search_results(items: list[dict[str, Any]]) -> list[dict[str, str]
             continue
 
         host = parsed.hostname.lower().removeprefix("www.")
-
-        if host in seen_hosts:
+        if host in seen_hosts or any(blocked in host for blocked in blocked_hosts):
             continue
-
-        if any(
-            blocked in host
-            for blocked in [
-                "google.",
-                "bing.",
-                "duckduckgo.",
-                "reddit.",
-                "youtube.com",
-                "facebook.com",
-                "x.com",
-                "twitter.com",
-            ]
-        ):
-            continue
-
         if not name or not description:
             continue
 
@@ -687,18 +672,20 @@ def _fallback_search_results(query: str) -> list[dict[str, str]]:
     return [dict(item) for _, item in ranked[:5]]
 
 
+def _clean_source(value: str) -> str:
+    if value.startswith("models/"):
+        value = value.removeprefix("models/")
+    return value[:80]
+
+
 def search_free_trials(query: str) -> tuple[list[dict[str, str]], str]:
     query = query.strip()
     if not query:
         raise ValueError("Query must not be empty")
 
-    try:
-        api_key = get_gemini_api_key()
-    except ValueError:
-        raise
-
+    api_key = get_gemini_api_key()
     if not api_key:
-        return _fallback_search_results(query), "fallback:no_gemini_key"
+        return _fallback_search_results(query), "fallback:no_api_key"
 
     prompt = f"""
 Find exactly five legitimate official websites relevant to this free-trial search:
@@ -724,76 +711,44 @@ JSON shape:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "results": {
-                        "type": "ARRAY",
-                        "minItems": 5,
-                        "maxItems": 5,
-                        "items": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "name": {"type": "STRING"},
-                                "url": {"type": "STRING"},
-                                "description": {"type": "STRING"},
-                            },
-                            "required": ["name", "url", "description"],
-                        },
-                    }
-                },
-                "required": ["results"],
-            },
+            "temperature": 0.2,
         },
     }
 
     try:
         model_name = get_available_gemini_model(api_key)
         response_json = _gemini_request(
-            f"/{model_name}:generateContent",
+            _model_generate_path(model_name),
             api_key,
             method="POST",
             payload=payload,
             timeout=30,
         )
 
-        text = (
-            response_json.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
-
-        parsed = _safe_json_from_gemini_text(text)
+        parsed = _extract_json_object(_gemini_text(response_json))
         results = _validate_search_results(parsed.get("results", []))
 
         if len(results) < 3:
-            fallback_urls = {item["url"] for item in results}
+            used_urls = {item["url"] for item in results}
             for fallback in _fallback_search_results(query):
-                if fallback["url"] not in fallback_urls:
+                if fallback["url"] not in used_urls:
                     results.append(fallback)
-                    fallback_urls.add(fallback["url"])
+                    used_urls.add(fallback["url"])
                 if len(results) == 5:
                     break
 
         if not results:
-            return _fallback_search_results(query), f"fallback:{model_name}:empty_result"
+            return _fallback_search_results(query), "fallback:empty_gemini_result"
 
-        return results[:5], f"gemini:{model_name}"
+        return results[:5], f"gemini:{_clean_source(model_name)}"
 
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
-        return (
-            _fallback_search_results(query),
-            f"fallback:gemini_http_{error.code}:{body[:120]}",
-        )
+        print(f"Gemini HTTP {error.code}: {body[:1000]}")
+        return _fallback_search_results(query), f"fallback:gemini_http_{error.code}"
     except (URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError) as error:
-        return (
-            _fallback_search_results(query),
-            f"fallback:gemini_failed:{str(error)[:120]}",
-        )
+        print(f"Gemini failed: {error}")
+        return _fallback_search_results(query), "fallback:gemini_failed"
     except RuntimeError as error:
-        return (
-            _fallback_search_results(query),
-            f"fallback:gemini_unavailable:{str(error)[:120]}",
-        )
+        print(f"Gemini unavailable: {error}")
+        return _fallback_search_results(query), "fallback:gemini_unavailable"

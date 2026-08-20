@@ -2,8 +2,8 @@
   if (window.__trialShieldContentLoaded) return;
   window.__trialShieldContentLoaded = true;
 
-  const MAX_TEXT_LENGTH = 250000;
-  const MAX_EVIDENCE = 12;
+  const MAX_TEXT_LENGTH = 220000;
+  const MAX_EVIDENCE = 10;
   const MAX_ACTIONS = 8;
 
   const TRIAL_KEYWORDS =
@@ -30,6 +30,14 @@
     return cleanText(document.body?.innerText || "").slice(0, MAX_TEXT_LENGTH);
   }
 
+  function textHash(value) {
+    let hash = 5381;
+    for (let i = 0; i < value.length; i++) {
+      hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
+    }
+    return String(hash);
+  }
+
   function sentences(text) {
     return text
       .split(/(?<=[.!?])\s+|\n+/)
@@ -48,7 +56,7 @@
   function evidenceFromText(text, limit = MAX_EVIDENCE) {
     const found = sentences(text)
       .filter((sentence) => TRIAL_KEYWORDS.test(sentence))
-      .map((sentence) => sentence.slice(0, 300));
+      .map((sentence) => sentence.slice(0, 280));
 
     return [...new Set(found)].slice(0, limit);
   }
@@ -108,6 +116,7 @@
     const text = pageText();
     const recurring = amountNearTrial(text);
     const fee = startingFee(text);
+
     const cancellation = firstMatch(text, [
       /((?:cancel|cancellation|turn off renewal|disable auto-?renewal)[^.]{0,220}(?:\.|$))/i,
       /((?:cancel anytime|no cancellation fee|contact support to cancel)[^.]{0,180}(?:\.|$))/i
@@ -131,7 +140,7 @@
         : null;
 
     return {
-      schema_version: "2.0",
+      schema_version: "2.1",
       source_url: location.href,
       provider_name: providerName(),
       page_title: document.title || null,
@@ -158,7 +167,7 @@
       trial_duration: trial.trial_duration,
       renewal_amount: trial.recurring_charge || trial.minimum_fee,
       currency: trial.currency || "USD",
-      billing_frequency: billingFrequency(`${trial.recurring_charge || ""} ${pageText().slice(0, 1000)}`),
+      billing_frequency: billingFrequency(`${trial.recurring_charge || ""} ${pageText().slice(0, 1200)}`),
       risk_score: Number.isFinite(Number(riskScore)) ? Number(riskScore) : 0,
       evidence: trial.evidence
     };
@@ -187,29 +196,30 @@
     );
   }
 
-  function candidateClickTargets() {
+  function candidateClickTargets(clickCounts = {}) {
     const elements = Array.from(
-      document.querySelectorAll(
-        'button, a, [role="button"], input[type="button"], input[type="submit"]'
-      )
+      document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')
     );
 
     return elements
       .filter(isVisible)
-      .map((element) => ({ element, label: clickableLabel(element) }))
+      .map((element, index) => ({ element, index, label: clickableLabel(element) }))
       .filter(({ label }) => label && CANCEL_ACTION_PATTERN.test(label))
       .filter(({ label }) => !AVOID_CLICK_PATTERN.test(label))
+      .filter(({ label }) => (clickCounts[label.toLowerCase()] || 0) < 2)
       .map((candidate) => {
         const label = candidate.label.toLowerCase();
         let score = 1;
-        if (/confirm cancellation|yes, cancel|confirm cancel/.test(label)) score += 60;
-        if (/cancel subscription|cancel plan|cancel trial|cancel membership/.test(label)) score += 50;
-        if (/turn off renewal|disable auto-?renewal|stop renewal/.test(label)) score += 45;
+
+        if (/confirm cancellation|yes, cancel|confirm cancel/.test(label)) score += 70;
+        if (/cancel subscription|cancel plan|cancel trial|cancel membership/.test(label)) score += 60;
+        if (/turn off renewal|disable auto-?renewal|stop renewal/.test(label)) score += 55;
+        if (/continue to cancel/.test(label)) score += 45;
         if (/manage subscription|manage plan|subscription settings|billing settings/.test(label)) score += 25;
-        if (/continue to cancel/.test(label)) score += 35;
+
         return { ...candidate, score };
       })
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => b.score - a.score || a.index - b.index);
   }
 
   function wait(ms) {
@@ -219,16 +229,20 @@
   async function performAutomaticCancellation() {
     const attemptedActions = [];
     const evidence = [];
+    const clickCounts = {};
+    const seenPageHashes = new Set();
     let reason = null;
 
     for (let step = 0; step < MAX_ACTIONS; step++) {
-      const text = pageText();
+      const beforeText = pageText();
+      const beforeHash = textHash(beforeText);
+      seenPageHashes.add(beforeHash);
 
-      for (const item of evidenceFromText(text, 6)) {
+      for (const item of evidenceFromText(beforeText, 6)) {
         if (!evidence.includes(item)) evidence.push(item);
       }
 
-      if (CONFIRMATION_PATTERN.test(text)) {
+      if (CONFIRMATION_PATTERN.test(beforeText)) {
         return {
           source_url: location.href,
           page_title: document.title || null,
@@ -241,20 +255,46 @@
         };
       }
 
-      const target = candidateClickTargets().find(
-        (item) => !attemptedActions.includes(item.label)
-      );
+      const target = candidateClickTargets(clickCounts)[0];
 
       if (!target) {
         reason = "No visible cancellation button or link was found on this page.";
         break;
       }
 
+      const labelKey = target.label.toLowerCase();
+      clickCounts[labelKey] = (clickCounts[labelKey] || 0) + 1;
       attemptedActions.push(target.label.slice(0, 160));
+
       target.element.scrollIntoView({ behavior: "smooth", block: "center" });
       await wait(250);
       target.element.click();
-      await wait(1100);
+      await wait(1200);
+
+      const afterText = pageText();
+      const afterHash = textHash(afterText);
+
+      if (CONFIRMATION_PATTERN.test(afterText)) {
+        for (const item of evidenceFromText(afterText, 8)) {
+          if (!evidence.includes(item)) evidence.push(item);
+        }
+
+        return {
+          source_url: location.href,
+          page_title: document.title || null,
+          attempted_actions: attemptedActions,
+          evidence,
+          confirmation_detected: true,
+          final_url: location.href,
+          raw_status: "confirmed",
+          reason: "Cancellation confirmation language was detected."
+        };
+      }
+
+      if (seenPageHashes.has(afterHash) && candidateClickTargets(clickCounts).length === 0) {
+        reason = "Cancellation controls stopped changing before confirmation was detected.";
+        break;
+      }
     }
 
     const finalText = pageText();
@@ -297,7 +337,6 @@
     const text = pageText();
     const trial = analyzeTrialPage();
     const key = `trialshield_state:${hostnameKey()}`;
-
     const stored = await chrome.storage.local.get(key).catch(() => ({}));
     const previous = stored[key] || {};
 
@@ -332,10 +371,7 @@
       },
       plan: previous.plan || { status: null, label: null, lastConfirmedAt: null },
       cancellation: {
-        stepsObserved: Math.max(
-          previous.cancellation?.stepsObserved || 0,
-          cancellationSteps.length
-        ),
+        stepsObserved: Math.max(previous.cancellation?.stepsObserved || 0, cancellationSteps.length),
         currentSteps: cancellationSteps,
         history: previous.cancellation?.history || [],
         changed: previous.cancellation?.changed || false,
@@ -360,25 +396,16 @@
         updateMonitorState().catch(() => {});
         sendResponse({ ok: true, trial });
       } catch (error) {
-        sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : "Unknown analysis error"
-        });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : "Unknown analysis error" });
       }
       return true;
     }
 
     if (message?.type === "TRIALSHIELD_BUILD_PROTECTION_PAYLOAD") {
       try {
-        sendResponse({
-          ok: true,
-          protection: buildProtectionPayload(message.riskScore)
-        });
+        sendResponse({ ok: true, protection: buildProtectionPayload(message.riskScore) });
       } catch (error) {
-        sendResponse({
-          ok: false,
-          error: error instanceof Error ? error.message : "Unknown protection error"
-        });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : "Unknown protection error" });
       }
       return true;
     }
@@ -399,6 +426,7 @@
   });
 
   let timer = null;
+
   function scheduleMonitorUpdate() {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => updateMonitorState().catch(() => {}), 700);
