@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TrialShield</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>TrialShield</h1>
+      <p class="subtitle">Find a free trial and review its terms.</p>
+
+      <form id="search-form" role="search">
+        <label for="search-input">Search free trials</label>
+        <div class="search-row">
+          <input
+            id="search-input"
+            type="search"
+            placeholder="Try music, design, streaming..."
+            autocomplete="off"
+          />
+          <button type="submit">Search</button>
+        </div>
+      </form>
+
+      <p id="result-count" class="status" aria-live="polite"></p>
+      <ul id="results" class="results"></ul>
+
+      <section id="trial-details" class="details" hidden>
+        <h2>Trial details on this page</h2>
+        <p id="analysis-status" class="status">Analyzing page…</p>
+        <dl id="details-list"></dl>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
