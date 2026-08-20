@@ -74,3 +74,101 @@ button:hover { background: #284f9f; }
 dl { margin: 8px 0 0; font-size: 12px; }
 dt { margin-top: 7px; color: #606a7c; font-weight: 600; }
 dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+
+/* --- Monitoring dashboard (Phase 3) ------------------------------------ */
+
+.monitor {
+  border: 1px solid #dfe3ea;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #ffffff;
+  margin-bottom: 4px;
+}
+
+.monitor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.current-page {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #172033;
+  overflow-wrap: anywhere;
+}
+
+.monitor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #606a7c;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #b5bcc8;
+  flex: none;
+}
+
+.dot-active { background: #2f7d3d; }
+.dot-idle { background: #b5bcc8; }
+
+.alerts {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.alerts:empty { margin: 0; }
+
+.alert {
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 7px 9px;
+  line-height: 1.35;
+}
+
+.alert-warning {
+  background: #fdecea;
+  color: #9a2c22;
+}
+
+.alert-ok {
+  background: #eaf6ec;
+  color: #205c2b;
+}
+
+.monitor-grid {
+  margin: 12px 0 0;
+  font-size: 12px;
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  row-gap: 6px;
+  column-gap: 8px;
+}
+
+.monitor-grid dt {
+  margin-top: 0;
+  color: #606a7c;
+  font-weight: 600;
+}
+
+.monitor-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+#monitor-lastscan {
+  margin: 10px 0 0;
+  font-size: 11px;
+}

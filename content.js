@@ -551,7 +551,9 @@
     lastUrl = snapshot.url;
     lastSnapshotHash = hash;
 
-    chrome.storage.local.set({ [`trialshield_monitor:${snapshot.url}`]: snapshot });
+    // Keyed by hostname (not URL) and overwritten each scan, so this never
+    // accumulates one entry per page visited on an SPA (Phase 3 hardening).
+    chrome.storage.local.set({ [`trialshield_monitor:${hostnameKey()}`]: snapshot });
 
     // Best-effort notification for the popup/background (Phase 3 wiring).
     // No listener is guaranteed to exist yet, so failures are ignored.
@@ -600,7 +602,21 @@
     if (pollTimer) clearInterval(pollTimer);
   }
 
+  // One-time cleanup of legacy per-URL monitor snapshots from before this
+  // key was switched to per-hostname (Phase 3 hardening: prevents unbounded
+  // chrome.storage.local growth on sites visited across many sessions).
+  function pruneLegacyMonitorKeys() {
+    chrome.storage.local.get(null, (all) => {
+      if (chrome.runtime.lastError) return;
+      const legacy = Object.keys(all || {}).filter(
+        (key) => key.startsWith("trialshield_monitor:") && /^trialshield_monitor:https?:\/\//.test(key)
+      );
+      if (legacy.length) chrome.storage.local.remove(legacy);
+    });
+  }
+
   function init() {
+    pruneLegacyMonitorKeys();
     scanAndMaybeUpdate(); // initial scan
     startObserving();
     patchHistoryForSpaNav();
