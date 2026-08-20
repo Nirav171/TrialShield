@@ -138,6 +138,45 @@
     pricing: ["pricing", "plans & pricing", "choose a plan", "compare plans"]
   };
 
+  // ---------------------------------------------------------------------
+  // Phase 2 constants: trial / payment / renewal / cancellation detection.
+  // ---------------------------------------------------------------------
+  const CURRENCY_SYMBOL_PATTERN = /[$€£₹]/;
+
+  const CANCELLATION_STEPS = [
+    {
+      label: "Subscription",
+      patterns: [/\byour subscription\b/i, /\byour membership\b/i, /\bsubscription overview\b/i]
+    },
+    {
+      label: "Manage Plan",
+      patterns: [/\bmanage plan\b/i, /\bmanage subscription\b/i, /\bsubscription settings\b/i, /\bbilling settings\b/i]
+    },
+    {
+      label: "Cancel Subscription",
+      patterns: [/\bcancel subscription\b/i, /\bcancel plan\b/i, /\bend membership\b/i, /\bturn off (?:auto-?)?renewal\b/i, /\bdisable auto-?renewal\b/i, /\bcancel my account\b/i]
+    },
+    {
+      label: "Cancellation Reason",
+      patterns: [/\bcancellation reason\b/i, /\bwhy are you (?:leaving|canceling|cancelling)\b/i, /\btell us why\b/i, /\breason for (?:canceling|cancelling)\b/i]
+    },
+    {
+      label: "Confirm Cancellation",
+      patterns: [/\bconfirm cancellation\b/i, /\bcancellation confirmed\b/i, /\bsubscription (?:has been |is )?cancel(?:l)?ed\b/i, /\byour plan (?:has been |was )?cancel(?:l)?ed\b/i]
+    }
+  ];
+
+  // A cancellation attempt is considered stale (and archived) if this much
+  // time passes without a new cancellation-flow signal on the same site.
+  const CANCELLATION_ATTEMPT_TIMEOUT_MS = 10 * 60 * 1000;
+  const MAX_TIMELINE_EVENTS = 60;
+  const MAX_CANCELLATION_HISTORY = 10;
+
+  // Serializes read-modify-write access to the per-site session record so
+  // concurrent scans (e.g. a fast scan followed by a debounced one) can't
+  // clobber each other.
+  let sessionWriteQueue = Promise.resolve();
+
   let observer = null;
   let debounceTimer = null;
   let pollTimer = null;
@@ -178,7 +217,8 @@
 
   // Collects structured, non-sensitive "relevant" text: headings, keyword
   // sentences, buttons/links, form labels, and open dialogs/modals.
-  function collectRelevantText() {
+  // `bodyText` is passed in so it's only computed once per scan.
+  function collectRelevantText(bodyText) {
     const items = [];
 
     document.querySelectorAll("h1, h2, h3").forEach((el) => {
@@ -186,7 +226,6 @@
       if (isVisible(el) && el.innerText?.trim()) dedupePush(items, el.innerText);
     });
 
-    const bodyText = (document.body?.innerText || "").slice(0, MAX_BODY_TEXT_LENGTH);
     bodyText
       .split(/(?<=[.!?])\s+|\n+/)
       .filter((sentence) => RELEVANT_KEYWORDS.test(sentence))
@@ -252,8 +291,242 @@
     return "unknown";
   }
 
-  function buildSnapshot() {
-    const relevantText = collectRelevantText();
+  // =========================================================================
+  // Phase 2 — Trial, Payment & Cancellation Intelligence
+  //
+  // Everything below reads ONLY visible label/heading/button/sentence text
+  // (never form field .value) and folds what it finds into a per-hostname
+  // "subscription journey" record in chrome.storage.local. Nothing here
+  // makes a network request or touches credential fields.
+  // =========================================================================
+
+  function firstMatch(text, patterns, fallback = null) {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match) return (match[1] || match[0]).trim();
+    }
+    return fallback;
+  }
+
+  // --- Trial detection -----------------------------------------------------
+  function analyzeTrial(text) {
+    const detected = /free trial|trial period|try (?:it |this )?free|start(?:ing)? your trial|\d+[\s-]*(?:day|week|month)s?[\s-]*trial|trial ends?\b/i.test(text);
+
+    const duration = firstMatch(text, [
+      /(?:free\s+)?trial(?:\s+period)?(?:\s+(?:for|of|lasts?))?\s+(\d+\s*(?:day|week|month)s?)/i,
+      /(\d+\s*(?:day|week|month)s?)\s+(?:free\s+)?trial/i
+    ]);
+
+    const priceAfterTrial = firstMatch(text, [
+      /(?:then|after (?:that|your trial|the trial)|renews at|billed at|you'?ll be charged)\s*[:\-]?\s*((?:[$€£₹]\s?\d+(?:[.,]\d{1,2})?)(?:\s*\/\s*(?:mo|month|yr|year|wk|week))?)/i,
+      /((?:[$€£₹]\s?\d+(?:[.,]\d{1,2})?)\s*\/\s*(?:mo|month|yr|year|wk|week))/i
+    ]);
+
+    const currency = priceAfterTrial?.match(CURRENCY_SYMBOL_PATTERN)?.[0] || null;
+
+    const billingFrequency = firstMatch(text, [
+      /\/\s*(month|mo|year|yr|week|wk)\b/i,
+      /\b(monthly|annually|yearly|weekly)\b/i
+    ], null)?.toLowerCase().replace(/^mo$/, "month").replace(/^yr$/, "year").replace(/^wk$/, "week") || null;
+
+    const paymentRequired = /(?:credit|debit) card required|payment method required|valid payment method/i.test(text)
+      ? true
+      : /no (?:credit )?card required/i.test(text)
+        ? false
+        : null;
+
+    const automaticRenewal = /automatically renew|auto-?renew|charged (?:automatically|after (?:the )?trial)|unless you cancel/i.test(text)
+      ? true
+      : /does not automatically renew|no auto-?renewal/i.test(text)
+        ? false
+        : null;
+
+    return { detected, duration, priceAfterTrial, currency, billingFrequency, paymentRequired, automaticRenewal };
+  }
+
+  // --- Payment page detection ----------------------------------------------
+  function analyzePayment(text, pageType, paymentFormPresent) {
+    const contextualHit = /payment method|credit card|debit card|billing address|card details|\bsubscribe\b|checkout|\bpay\b|billing/i.test(text);
+    const pageDetected = pageType === "payment" || pageType === "checkout" || paymentFormPresent || contextualHit;
+    const methodRequired = paymentFormPresent
+      ? true
+      : /payment method required|valid payment method|card required/i.test(text)
+        ? true
+        : null;
+    return { pageDetected, methodRequired };
+  }
+
+  // --- Renewal detection -----------------------------------------------------
+  function analyzeRenewal(trialInfo) {
+    return { automatic: trialInfo.automaticRenewal, price: trialInfo.priceAfterTrial };
+  }
+
+  // --- Cancellation step detection ------------------------------------------
+  // Returns the ordered list of canonical step labels found on THIS page
+  // (a single page, e.g. a confirmation dialog, may match more than one).
+  function detectCancellationStepsOnPage(text) {
+    const found = [];
+    for (const step of CANCELLATION_STEPS) {
+      if (step.patterns.some((pattern) => pattern.test(text))) found.push(step.label);
+    }
+    return found;
+  }
+
+  function hostnameKey() {
+    return location.hostname.replace(/^www\./, "") || "unknown-site";
+  }
+
+  function emptySession() {
+    return {
+      currentSite: {},
+      trial: { detected: false, duration: null, priceAfterTrial: null, currency: null, billingFrequency: null, paymentRequired: null, automaticRenewal: null },
+      payment: { pageDetected: false, methodRequired: null },
+      renewal: { automatic: null, price: null },
+      cancellation: { stepsObserved: 0, currentSteps: [], history: [], changed: false, lastChange: null, attemptStartedAt: null, lastSignalAt: null },
+      timeline: [],
+      loggedEvents: [], // internal: event keys already recorded, prevents duplicate timeline spam
+      lastUpdated: 0
+    };
+  }
+
+  function pushTimelineEvent(session, key, label) {
+    if (session.loggedEvents.includes(key)) return;
+    session.loggedEvents.push(key);
+    session.timeline.push({ time: new Date().toLocaleTimeString(), label, at: Date.now() });
+    if (session.timeline.length > MAX_TIMELINE_EVENTS) session.timeline.shift();
+  }
+
+  // Merges the current page's findings into the running session using
+  // "sticky" semantics: once something true/non-null is observed, it is
+  // kept even if a later page in the same flow doesn't repeat it, because
+  // the journey (landing -> pricing -> trial -> payment -> confirmation)
+  // spans multiple page loads.
+  function mergeJourney(session, snapshot, text) {
+    session.currentSite = {
+      url: snapshot.url,
+      hostname: hostnameKey(),
+      pageType: snapshot.pageType,
+      title: snapshot.title
+    };
+
+    // Trial
+    const trialInfo = analyzeTrial(text);
+    if (trialInfo.detected) session.trial.detected = true;
+    session.trial.duration = trialInfo.duration || session.trial.duration;
+    session.trial.priceAfterTrial = trialInfo.priceAfterTrial || session.trial.priceAfterTrial;
+    session.trial.currency = trialInfo.currency || session.trial.currency;
+    session.trial.billingFrequency = trialInfo.billingFrequency || session.trial.billingFrequency;
+    if (trialInfo.paymentRequired !== null) session.trial.paymentRequired = trialInfo.paymentRequired;
+    if (trialInfo.automaticRenewal !== null) session.trial.automaticRenewal = trialInfo.automaticRenewal;
+
+    // Payment
+    const paymentFormPresent = hasPaymentForm();
+    const paymentInfo = analyzePayment(text, snapshot.pageType, paymentFormPresent);
+    if (paymentInfo.pageDetected) session.payment.pageDetected = true;
+    if (paymentInfo.methodRequired !== null) session.payment.methodRequired = paymentInfo.methodRequired;
+
+    // Renewal (derived from trial info, kept as its own top-level field per spec)
+    const renewalInfo = analyzeRenewal(session.trial);
+    session.renewal.automatic = renewalInfo.automatic;
+    session.renewal.price = renewalInfo.price;
+
+    // Cancellation flow tracking
+    const stepsOnPage = detectCancellationStepsOnPage(text);
+    if (stepsOnPage.length) {
+      const now = Date.now();
+      const gapExceeded = session.cancellation.lastSignalAt && (now - session.cancellation.lastSignalAt > CANCELLATION_ATTEMPT_TIMEOUT_MS);
+      if (gapExceeded) {
+        // Previous attempt went stale; archive it before starting a new one.
+        archiveCancellationAttempt(session);
+      }
+      if (!session.cancellation.attemptStartedAt) session.cancellation.attemptStartedAt = now;
+      session.cancellation.lastSignalAt = now;
+
+      for (const label of stepsOnPage) {
+        if (!session.cancellation.currentSteps.includes(label)) {
+          session.cancellation.currentSteps.push(label);
+          pushTimelineEvent(session, `cancel_step:${label}`, `Cancellation step observed: ${label}`);
+        }
+      }
+      session.cancellation.stepsObserved = session.cancellation.currentSteps.length;
+
+      // Reaching the final step completes this attempt right away.
+      if (stepsOnPage.includes("Confirm Cancellation")) {
+        archiveCancellationAttempt(session);
+      }
+    }
+
+    // Meaningful, deduplicated timeline events (page-type based).
+    if (trialInfo.detected) pushTimelineEvent(session, "trial_detected", "Trial detected");
+    if (snapshot.pageType === "pricing") pushTimelineEvent(session, "pricing_detected", "Pricing detected");
+    if (snapshot.pageType === "signup") pushTimelineEvent(session, "signup_detected", "Signup detected");
+    if (paymentInfo.pageDetected) pushTimelineEvent(session, "payment_page_detected", "Payment page detected");
+    if (session.payment.methodRequired === true) pushTimelineEvent(session, "payment_required", "Payment required");
+    if (session.renewal.automatic === true) pushTimelineEvent(session, "auto_renewal_detected", "Auto-renewal detected");
+    if (snapshot.pageType === "confirmation") pushTimelineEvent(session, "confirmation_detected", "Confirmation detected");
+
+    session.lastUpdated = Date.now();
+    return session;
+  }
+
+  // Closes out the in-progress cancellation attempt: records it in history,
+  // compares its length to the previous attempt on this site, and flags a
+  // neutral "process changed" note if the step count differs. This never
+  // asserts intent (e.g. "made harder on purpose") - just reports the fact.
+  function archiveCancellationAttempt(session) {
+    const steps = session.cancellation.currentSteps;
+    if (!steps.length) return;
+
+    const previous = session.cancellation.history[session.cancellation.history.length - 1] || null;
+    const completed = { steps: [...steps], count: steps.length, at: Date.now() };
+    session.cancellation.history.push(completed);
+    if (session.cancellation.history.length > MAX_CANCELLATION_HISTORY) session.cancellation.history.shift();
+
+    if (previous && previous.count !== completed.count) {
+      session.cancellation.changed = true;
+      session.cancellation.lastChange = { previousSteps: previous.count, currentSteps: completed.count };
+      pushTimelineEvent(
+        session,
+        `cancel_changed:${previous.count}->${completed.count}:${Date.now()}`,
+        `Cancellation process changed (previous: ${previous.count} steps, current: ${completed.count} steps)`
+      );
+    }
+
+    session.cancellation.currentSteps = [];
+    session.cancellation.attemptStartedAt = null;
+    session.cancellation.lastSignalAt = null;
+  }
+
+  // Reads-modifies-writes the per-hostname session record. Calls are
+  // serialized through sessionWriteQueue so overlapping scans can't race.
+  function queueSessionUpdate(snapshot, bodyText) {
+    sessionWriteQueue = sessionWriteQueue.then(async () => {
+      const key = `trialshield_state:${hostnameKey()}`;
+      try {
+        const stored = await chrome.storage.local.get(key);
+        const session = stored[key] ? { ...emptySession(), ...stored[key] } : emptySession();
+        // Deep-merge nested objects that were spread shallowly above.
+        session.trial = { ...emptySession().trial, ...(stored[key]?.trial || {}) };
+        session.payment = { ...emptySession().payment, ...(stored[key]?.payment || {}) };
+        session.renewal = { ...emptySession().renewal, ...(stored[key]?.renewal || {}) };
+        session.cancellation = { ...emptySession().cancellation, ...(stored[key]?.cancellation || {}) };
+        session.timeline = stored[key]?.timeline || [];
+        session.loggedEvents = stored[key]?.loggedEvents || [];
+
+        const updated = mergeJourney(session, snapshot, bodyText);
+        await chrome.storage.local.set({ [key]: updated });
+
+        chrome.runtime.sendMessage({ type: "TRIALSHIELD_JOURNEY_UPDATED", hostname: hostnameKey(), data: updated }).catch(() => {});
+      } catch (error) {
+        // Storage can fail (quota, context invalidated on extension reload,
+        // etc.) - never let it throw and break the page's monitoring loop.
+        console.warn("TrialShield: session update failed", error);
+      }
+    });
+  }
+
+  function buildSnapshot(bodyText) {
+    const relevantText = collectRelevantText(bodyText);
     return {
       url: location.href,
       title: document.title || null,
@@ -267,7 +540,8 @@
     const now = Date.now();
     if (now - lastScanTime < MIN_SCAN_INTERVAL_MS) return;
 
-    const snapshot = buildSnapshot();
+    const bodyText = (document.body?.innerText || "").slice(0, MAX_BODY_TEXT_LENGTH);
+    const snapshot = buildSnapshot(bodyText);
     const hash = hashString(snapshot.pageType + "|" + snapshot.relevantText.join("|"));
     const urlChanged = snapshot.url !== lastUrl;
 
@@ -282,6 +556,10 @@
     // Best-effort notification for the popup/background (Phase 3 wiring).
     // No listener is guaranteed to exist yet, so failures are ignored.
     chrome.runtime.sendMessage({ type: "TRIALSHIELD_PAGE_UPDATED", data: snapshot }).catch(() => {});
+
+    // Phase 2: fold this scan into the site's running subscription-journey
+    // state (trial / payment / renewal / cancellation / timeline).
+    queueSessionUpdate(snapshot, bodyText);
   }
 
   function scheduleScan() {
