@@ -17,14 +17,21 @@ const NEUTRAL_COLOR = "#2f7d3d";
 function computeBadge(data) {
   if (!data) return { text: "", color: NEUTRAL_COLOR };
 
+  // Once the site confirms the account is on a paid plan, trial/renewal
+  // warnings no longer apply to this user - stop badging them. This is the
+  // only thing that gates a "!" warning off: cancellation-flow info is still
+  // useful to a paid user, so it isn't suppressed here.
+  const onPaidPlan = data.plan?.status === "paid";
+
   const hasWarning =
-    (data.trial?.detected && data.trial?.paymentRequired === true) ||
-    data.renewal?.automatic === true ||
-    data.cancellation?.changed === true;
+    !onPaidPlan &&
+    ((data.trial?.detected && data.trial?.paymentRequired === true) ||
+      data.renewal?.automatic === true ||
+      data.cancellation?.changed === true);
 
   if (hasWarning) return { text: "!", color: WARNING_COLOR };
 
-  const hasPositiveSignal = data.trial?.detected || data.cancellation?.stepsObserved > 0;
+  const hasPositiveSignal = (!onPaidPlan && data.trial?.detected) || data.cancellation?.stepsObserved > 0;
   if (hasPositiveSignal) return { text: "\u2713", color: NEUTRAL_COLOR }; // checkmark
 
   return { text: "", color: NEUTRAL_COLOR };

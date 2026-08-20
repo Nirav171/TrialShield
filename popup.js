@@ -117,6 +117,7 @@ analyzeActivePage();
   const statusDot = document.querySelector("#monitor-dot");
   const statusText = document.querySelector("#monitor-status-text");
   const alertsEl = document.querySelector("#monitor-alerts");
+  const planEl = document.querySelector("#monitor-plan");
   const trialEl = document.querySelector("#monitor-trial");
   const paymentEl = document.querySelector("#monitor-payment");
   const renewalEl = document.querySelector("#monitor-renewal");
@@ -168,16 +169,27 @@ analyzeActivePage();
 
   function buildAlerts(data) {
     const alerts = [];
-    if (data.trial?.detected && data.payment?.methodRequired === true) {
-      addAlert(alerts, "Payment required for the free trial", "warning");
+    const onPaidPlan = data.plan?.status === "paid";
+
+    // Trial/renewal warnings only make sense while the account is actually
+    // on a free/trial plan. Once we've seen a "current plan: paid" style
+    // statement on this site, stop surfacing them - show that fact instead.
+    if (onPaidPlan) {
+      addAlert(alerts, "You're on a paid plan here - trial alerts are paused", "ok");
+    } else {
+      if (data.trial?.detected && data.payment?.methodRequired === true) {
+        addAlert(alerts, "Payment required for the free trial", "warning");
+      }
+      if (data.renewal?.automatic === true) {
+        addAlert(
+          alerts,
+          data.renewal.price ? `Trial automatically renews at ${data.renewal.price}` : "Trial automatically renews",
+          "warning"
+        );
+      }
     }
-    if (data.renewal?.automatic === true) {
-      addAlert(
-        alerts,
-        data.renewal.price ? `Trial automatically renews at ${data.renewal.price}` : "Trial automatically renews",
-        "warning"
-      );
-    }
+
+    // Cancellation-flow changes stay relevant regardless of plan status.
     if (data.cancellation?.changed && data.cancellation.lastChange) {
       const { previousSteps, currentSteps } = data.cancellation.lastChange;
       addAlert(alerts, `Cancellation process changed (${previousSteps} → ${currentSteps} steps)`, "warning");
@@ -199,7 +211,21 @@ analyzeActivePage();
     }
   }
 
-  function renderTrial(trial) {
+  function renderPlan(plan) {
+    if (plan?.status === "paid") {
+      planEl.textContent = "💳 Paid plan detected";
+    } else if (plan?.status === "free") {
+      planEl.textContent = "Free plan";
+    } else {
+      planEl.textContent = "No plan information yet";
+    }
+  }
+
+  function renderTrial(trial, plan) {
+    if (plan?.status === "paid") {
+      trialEl.textContent = "Not applicable - already on a paid plan";
+      return;
+    }
     if (!trial?.detected) {
       trialEl.textContent = "No trial detected on this site yet";
       return;
@@ -247,6 +273,7 @@ analyzeActivePage();
       statusDot.className = "dot dot-idle";
       statusText.textContent = "Not monitored yet";
       alertsEl.replaceChildren();
+      planEl.textContent = "No plan information yet";
       trialEl.textContent = "No trial information yet";
       paymentEl.textContent = "No payment information yet";
       renewalEl.textContent = "No renewal information yet";
@@ -262,7 +289,8 @@ analyzeActivePage();
     statusText.textContent = "Monitoring this website";
 
     renderAlerts(data);
-    renderTrial(data.trial);
+    renderPlan(data.plan);
+    renderTrial(data.trial, data.plan);
     renderPayment(data.payment);
     renderRenewal(data.renewal);
     renderCancellation(data.cancellation);

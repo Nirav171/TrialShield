@@ -172,6 +172,48 @@
   const MAX_TIMELINE_EVENTS = 60;
   const MAX_CANCELLATION_HISTORY = 10;
 
+  // --- Plan status (free vs. paid) detection --------------------------------
+  // Purpose: once a user has upgraded off a free/trial plan, trial/renewal/
+  // cancellation warnings are no longer relevant to them. These patterns look
+  // for language that describes the ACCOUNT'S CURRENT plan (not marketing
+  // copy), so "upgrade to Pro" alone doesn't flip status - it has to read
+  // like a statement of the account's present state.
+  const PLAN_NAME = "(?:pro|premium|paid|plus|business|team|starter\\+|gold)";
+  const PLAN_STATUS_PATTERNS = {
+    paid: [
+      new RegExp(`you'?re (?:currently )?on (?:the |a )?${PLAN_NAME}\\s*plan`, "i"),
+      new RegExp(`current plan:?\\s*${PLAN_NAME}\\b`, "i"),
+      new RegExp(`your (?:current )?plan:?\\s*${PLAN_NAME}\\b`, "i"),
+      /thanks for (?:subscribing|upgrading)\b/i,
+      /you'?ve (?:successfully )?upgraded\b/i,
+      /your subscription is active\b/i,
+      new RegExp(`manage your ${PLAN_NAME} subscription`, "i"),
+      new RegExp(`downgrade to (?:the )?free plan`, "i")
+    ],
+    free: [
+      /you'?re (?:currently )?on the free plan\b/i,
+      /current plan:?\s*free\b/i,
+      /your (?:current )?plan:?\s*free\b/i,
+      /you are on a free (?:plan|account)\b/i,
+      /you'?re not (?:currently )?subscribed\b/i
+    ]
+  };
+
+  // Returns { status: 'paid' | 'free' | null, label: string | null }.
+  // Checked in this order because an explicit "current plan" statement is a
+  // stronger, less ambiguous signal than generic upsell copy.
+  function detectPlanStatus(text) {
+    for (const pattern of PLAN_STATUS_PATTERNS.paid) {
+      const match = text.match(pattern);
+      if (match) return { status: "paid", label: match[0].trim().slice(0, 120) };
+    }
+    for (const pattern of PLAN_STATUS_PATTERNS.free) {
+      const match = text.match(pattern);
+      if (match) return { status: "free", label: match[0].trim().slice(0, 120) };
+    }
+    return { status: null, label: null };
+  }
+
   // Serializes read-modify-write access to the per-site session record so
   // concurrent scans (e.g. a fast scan followed by a debounced one) can't
   // clobber each other.
@@ -382,6 +424,10 @@
       trial: { detected: false, duration: null, priceAfterTrial: null, currency: null, billingFrequency: null, paymentRequired: null, automaticRenewal: null },
       payment: { pageDetected: false, methodRequired: null },
       renewal: { automatic: null, price: null },
+      // Current account plan, as opposed to the trial/renewal terms above.
+      // null = not yet determined; "free" or "paid" once a confident
+      // "current plan" statement has been seen on some page of the site.
+      plan: { status: null, label: null, lastConfirmedAt: null },
       cancellation: { stepsObserved: 0, currentSteps: [], history: [], changed: false, lastChange: null, attemptStartedAt: null, lastSignalAt: null },
       timeline: [],
       loggedEvents: [], // internal: event keys already recorded, prevents duplicate timeline spam
@@ -429,6 +475,28 @@
     const renewalInfo = analyzeRenewal(session.trial);
     session.renewal.automatic = renewalInfo.automatic;
     session.renewal.price = renewalInfo.price;
+
+    // Plan status (free vs. paid). Unlike trial/payment/renewal fields above,
+    // this is NOT sticky-true-forever: it reflects the most recent confident
+    // reading, because a user can legitimately move from free -> paid, and
+    // (less commonly) paid -> free after cancelling. A page with no plan
+    // language leaves the previous known status untouched.
+    const planInfo = detectPlanStatus(text);
+    if (planInfo.status && planInfo.status !== session.plan.status) {
+      const previousStatus = session.plan.status;
+      session.plan.status = planInfo.status;
+      session.plan.label = planInfo.label;
+      session.plan.lastConfirmedAt = Date.now();
+      if (previousStatus === "free" && planInfo.status === "paid") {
+        pushTimelineEvent(session, `plan_upgraded:${Date.now()}`, "Upgraded to a paid plan");
+      } else if (previousStatus === "paid" && planInfo.status === "free") {
+        pushTimelineEvent(session, `plan_downgraded:${Date.now()}`, "Moved back to the free plan");
+      } else if (!previousStatus) {
+        pushTimelineEvent(session, `plan_detected:${planInfo.status}`, `Current plan detected: ${planInfo.status}`);
+      }
+    } else if (planInfo.status === session.plan.status && planInfo.label) {
+      session.plan.lastConfirmedAt = Date.now();
+    }
 
     // Cancellation flow tracking
     const stepsOnPage = detectCancellationStepsOnPage(text);
@@ -509,6 +577,7 @@
         session.trial = { ...emptySession().trial, ...(stored[key]?.trial || {}) };
         session.payment = { ...emptySession().payment, ...(stored[key]?.payment || {}) };
         session.renewal = { ...emptySession().renewal, ...(stored[key]?.renewal || {}) };
+        session.plan = { ...emptySession().plan, ...(stored[key]?.plan || {}) };
         session.cancellation = { ...emptySession().cancellation, ...(stored[key]?.cancellation || {}) };
         session.timeline = stored[key]?.timeline || [];
         session.loggedEvents = stored[key]?.loggedEvents || [];
