@@ -81,7 +81,16 @@ async function analyzeActivePage() {
 
   details.hidden = false;
   try {
-    const response = await chrome.tabs.sendMessage(tab.id, { type: "TRIALSHIELD_ANALYZE" });
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tab.id, { type: "TRIALSHIELD_ANALYZE" });
+    } catch {
+      // No content script listening yet - this happens on tabs that were
+      // already open before the extension was installed/reloaded. Inject it
+      // now (permission already granted via "scripting") and retry once.
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+      response = await chrome.tabs.sendMessage(tab.id, { type: "TRIALSHIELD_ANALYZE" });
+    }
     if (!response?.ok) throw new Error(response?.error || "Analysis unavailable");
     const trial = response.trial;
     analysisStatus.textContent = trial.has_free_trial
@@ -96,7 +105,7 @@ async function analyzeActivePage() {
     addDetail("Cancellation terms", trial.cancellation_terms);
     addDetail("Evidence", trial.evidence);
   } catch {
-    analysisStatus.textContent = "Reload this page once after installing the extension to analyze it.";
+    analysisStatus.textContent = "This page can't be analyzed (browser-restricted page or extension store page).";
   }
 }
 

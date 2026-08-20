@@ -29,6 +29,21 @@
       .slice(0, MAX_EVIDENCE);
   }
 
+  function feeFromContext(text) {
+    // Only trust a currency amount if it appears in a sentence that also
+    // talks about the trial/signup/checkout, not just any price on the page.
+    const contextPattern = /free trial|trial|sign\s*up|checkout|subscription|plan|today|to start/i;
+    const sentences = text.split(/(?<=[.!?])\s+|\n+/);
+    for (const sentence of sentences) {
+      if (!contextPattern.test(sentence)) continue;
+      const match =
+        sentence.match(/((?:\$|\u20ac|\u00a3|\u20b9)\s*\d+(?:[.,]\d{1,2})?)(?:\s+(?:today|to start))?/i) ||
+        sentence.match(/(no (?:upfront|initial) (?:fee|charge))/i);
+      if (match) return (match[1] || match[0]).trim();
+    }
+    return null;
+  }
+
   function analyzeTrialPage() {
     const text = normalizedPageText();
     const evidence = nearbyEvidence(text);
@@ -40,10 +55,7 @@
       /trial (?:starts?|begins?)\s+(today|immediately|on[^.\n]{1,50})/i,
       /(starts? (?:today|immediately|when you (?:sign up|subscribe)))/i
     ], duration ? "When signup is completed" : null);
-    const fee = firstMatch(text, [
-      /((?:\$|\u20ac|\u00a3|\u20b9)\s*\d+(?:[.,]\d{1,2})?)(?:\s+(?:today|to start))?/i,
-      /(no (?:upfront|initial) (?:fee|charge))/i
-    ]);
+    const fee = feeFromContext(text);
     const cancellation = firstMatch(text, [
       /((?:cancel|cancellation)[^.\n]{0,180}(?:\.|$))/i,
       /((?:no cancellation fee|cancel anytime)[^.\n]{0,120})/i
