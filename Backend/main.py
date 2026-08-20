@@ -1,5 +1,7 @@
 """FastAPI application and routes for the TrialShield hackathon demo."""
 
+from __future__ import annotations
+
 import re
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -9,11 +11,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 try:
-    # Package imports support: uvicorn Backend.main:app --reload
     from .database import create_db, get_db
     from .models import AuditEvent, Trial, VirtualCard
     from .schemas import (
         AuditEventResponse,
+        CancellationAttemptRequest,
+        CancellationAttemptResponse,
+        EvidenceAnalysisRequest,
+        EvidenceAnalysisResponse,
+        EvidenceFlag,
         HealthCheck,
         PageAnalysisResponse,
         ProtectTrialRequest,
@@ -21,16 +27,28 @@ try:
         RiskFactor,
         RiskLevel,
         RiskScoreResponse,
+        SearchRequest,
+        SearchResponse,
         TrialPage,
         TrialResponse,
     )
-    from .services import create_protected_trial, log_event
+    from .services import (
+        analyze_evidence_texts,
+        create_protected_trial,
+        log_event,
+        record_cancellation_attempt,
+        search_free_trials,
+    )
 except ImportError:
-    # Script-directory imports support: cd Backend; uvicorn main:app --reload
     from database import create_db, get_db
     from models import AuditEvent, Trial, VirtualCard
     from schemas import (
         AuditEventResponse,
+        CancellationAttemptRequest,
+        CancellationAttemptResponse,
+        EvidenceAnalysisRequest,
+        EvidenceAnalysisResponse,
+        EvidenceFlag,
         HealthCheck,
         PageAnalysisResponse,
         ProtectTrialRequest,
@@ -38,64 +56,89 @@ except ImportError:
         RiskFactor,
         RiskLevel,
         RiskScoreResponse,
+        SearchRequest,
+        SearchResponse,
         TrialPage,
         TrialResponse,
     )
-    from services import create_protected_trial, log_event
+    from services import (
+        analyze_evidence_texts,
+        create_protected_trial,
+        log_event,
+        record_cancellation_attempt,
+        search_free_trials,
+    )
 
 
 app = FastAPI(
     title="TrialShield API",
     description=(
-        "Local page analysis and simulated trial-protection API for a "
-        "hackathon demo. No real payment cards are created."
+        "Local trial-risk analysis, Gemini-powered trial discovery, simulated "
+        "card protection, automatic cancellation attempts, and audit evidence."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
-# The Chrome extension calls this local API directly. Wildcard CORS is kept
-# intentionally simple for the local-only hackathon demo.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
-# Create the four tables when the app starts importing under Uvicorn.
 create_db()
 
 
 @app.get("/", response_model=HealthCheck, tags=["health"])
 @app.get("/check", response_model=HealthCheck, tags=["health"])
 def check() -> HealthCheck:
-    """Return a small health response for local setup checks."""
-
     return HealthCheck()
+
+
+@app.post("/search", response_model=SearchResponse, tags=["gemini"])
+def search_trials(request: SearchRequest) -> SearchResponse:
+    try:
+        results, source = search_free_trials(request.query)
+        return SearchResponse(results=results, source=source)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 def _is_missing(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
-@app.post(
-    "/analyze-page",
-    response_model=PageAnalysisResponse,
-    tags=["analysis"],
-)
-def analyze_page(trial: TrialPage) -> PageAnalysisResponse:
-    """Validate structured page data and explain any missing details."""
+@app.post("/evidence/analyze", response_model=EvidenceAnalysisResponse, tags=["analysis"])
+def analyze_evidence(request: EvidenceAnalysisRequest) -> EvidenceAnalysisResponse:
+    flags = analyze_evidence_texts(request.evidence)
+    summary = (
+        "No major evidence flags detected."
+        if not flags
+        else f"{len(flags)} evidence flag{'s' if len(flags) != 1 else ''} detected."
+    )
+    return EvidenceAnalysisResponse(
+        source_url=request.source_url,
+        flags=flags,
+        summary=summary,
+    )
 
+
+@app.post("/analyze-page", response_model=PageAnalysisResponse, tags=["analysis"])
+def analyze_page(trial: TrialPage) -> PageAnalysisResponse:
     tracked_fields = {
         "trial_start": trial.trial_start,
         "trial_duration": trial.trial_duration,
         "cancellation_terms": trial.cancellation_terms,
         "minimum_fee": trial.minimum_fee,
+        "recurring_charge": trial.recurring_charge,
         "payment_method_required": trial.payment_method_required,
         "auto_renews": trial.auto_renews,
         "evidence": trial.evidence,
     }
+
     missing_fields = [
         name
         for name, value in tracked_fields.items()
@@ -107,43 +150,44 @@ def analyze_page(trial: TrialPage) -> PageAnalysisResponse:
 
     warnings: list[str] = []
     if not trial.has_free_trial:
-        warnings.append(
-            "The supplied page data does not contain a confirmed free trial."
-        )
+        warnings.append("The supplied page data does not confirm a free trial.")
     if trial.auto_renews is True and _is_missing(trial.cancellation_terms):
-        warnings.append(
-            "The trial auto-renews, but cancellation terms were not supplied."
-        )
+        warnings.append("The trial auto-renews, but cancellation terms were not found.")
     if trial.payment_method_required is True and _is_missing(trial.minimum_fee):
-        warnings.append(
-            "A payment method is required, but the starting charge is unclear."
-        )
+        warnings.append("A payment method is required, but the first charge is unclear.")
     if trial.cancellation_terms and re.search(
         r"non[- ]?refundable|cancellation fee|early termination|"
-        r"minimum commitment",
+        r"minimum commitment|no refunds?",
         trial.cancellation_terms,
         re.IGNORECASE,
     ):
-        warnings.append(
-            "The cancellation text may contain a fee or minimum commitment."
-        )
+        warnings.append("Cancellation text may contain a fee or commitment.")
     if not trial.evidence:
         warnings.append("No supporting page-text evidence was supplied.")
+
+    evidence_flags = analyze_evidence_texts(
+        trial.evidence
+        + [
+            value
+            for value in [
+                trial.cancellation_terms,
+                trial.minimum_fee,
+                trial.recurring_charge,
+            ]
+            if value
+        ]
+    )
 
     return PageAnalysisResponse(
         trial=trial,
         completeness_score=completeness_score,
         missing_fields=missing_fields,
         warnings=warnings,
+        evidence_flags=evidence_flags,
     )
 
 
-def _factor(
-    code: str,
-    label: str,
-    points: int,
-    explanation: str,
-) -> RiskFactor:
+def _factor(code: str, label: str, points: int, explanation: str) -> RiskFactor:
     return RiskFactor(
         code=code,
         label=label,
@@ -153,8 +197,10 @@ def _factor(
 
 
 def _has_nonzero_fee(value: str | None) -> bool:
-    if not value or re.search(
-        r"\bno\s+(?:upfront|initial)\s+(?:fee|charge)\b",
+    if not value:
+        return False
+    if re.search(
+        r"\bno\s+(?:upfront|initial|starting)?\s*(?:fee|charge)\b",
         value,
         re.IGNORECASE,
     ):
@@ -175,8 +221,6 @@ def _risk_level(score: int) -> RiskLevel:
 
 @app.post("/risk-score", response_model=RiskScoreResponse, tags=["analysis"])
 def risk_score(trial: TrialPage) -> RiskScoreResponse:
-    """Calculate the existing transparent risk score from page details."""
-
     factors: list[RiskFactor] = []
 
     if not trial.has_free_trial:
@@ -188,13 +232,14 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
                 "The page data does not clearly confirm a free trial.",
             )
         )
+
     if trial.auto_renews is True:
         factors.append(
             _factor(
                 "auto_renewal",
                 "Automatic renewal",
                 30,
-                "The subscription may start charging automatically after the trial.",
+                "The subscription may charge automatically after the trial.",
             )
         )
     elif trial.auto_renews is None:
@@ -203,16 +248,17 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
                 "unknown_renewal",
                 "Renewal unclear",
                 12,
-                "The page data does not state whether the trial renews automatically.",
+                "The page does not clearly say whether the trial renews automatically.",
             )
         )
+
     if trial.payment_method_required is True:
         factors.append(
             _factor(
                 "payment_required",
                 "Payment method required",
                 20,
-                "A payment method is required before the trial can begin.",
+                "A payment method appears to be required before the trial starts.",
             )
         )
     elif trial.payment_method_required is None:
@@ -221,9 +267,10 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
                 "unknown_payment",
                 "Payment requirement unclear",
                 8,
-                "The payment-method requirement was not identified.",
+                "The extension did not identify whether payment details are required.",
             )
         )
+
     if _has_nonzero_fee(trial.minimum_fee):
         factors.append(
             _factor(
@@ -233,18 +280,29 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
                 f"The detected starting fee is {trial.minimum_fee}.",
             )
         )
+
+    if trial.recurring_charge:
+        factors.append(
+            _factor(
+                "recurring_charge_detected",
+                "Recurring charge detected",
+                12,
+                f"The detected recurring charge is {trial.recurring_charge}.",
+            )
+        )
+
     if not trial.cancellation_terms:
         factors.append(
             _factor(
                 "missing_cancellation",
                 "Cancellation terms missing",
                 20,
-                "The extension could not identify cancellation terms.",
+                "Cancellation terms were not identified on the page.",
             )
         )
     elif re.search(
         r"non[- ]?refundable|cancellation fee|early termination|"
-        r"minimum commitment|no refunds?",
+        r"minimum commitment|no refunds?|contact support|email support",
         trial.cancellation_terms,
         re.IGNORECASE,
     ):
@@ -253,9 +311,10 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
                 "restrictive_cancellation",
                 "Restrictive cancellation terms",
                 20,
-                "The terms mention a fee, commitment, or refund restriction.",
+                "The terms mention friction, fees, support contact, or refund limits.",
             )
         )
+
     if not trial.trial_duration:
         factors.append(
             _factor(
@@ -265,18 +324,32 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
                 "The length of the trial was not identified.",
             )
         )
+
     if not trial.evidence:
         factors.append(
             _factor(
                 "missing_evidence",
                 "No supporting evidence",
                 10,
-                "No relevant page text was included for verification.",
+                "No relevant page evidence was captured.",
             )
         )
 
+    evidence_flags = analyze_evidence_texts(trial.evidence)
+    for flag in evidence_flags:
+        if flag.severity == "high":
+            factors.append(
+                _factor(
+                    f"evidence_{flag.code}",
+                    flag.label,
+                    10,
+                    flag.explanation,
+                )
+            )
+
     score = min(100, sum(item.points for item in factors))
     level = _risk_level(score)
+
     summary = (
         "No material trial risks were detected from the supplied fields."
         if not factors
@@ -286,6 +359,7 @@ def risk_score(trial: TrialPage) -> RiskScoreResponse:
             f"{level.value} risk rating."
         )
     )
+
     return RiskScoreResponse(
         source_url=trial.source_url,
         provider_name=trial.provider_name,
@@ -306,8 +380,6 @@ def protect_trial(
     request: ProtectTrialRequest,
     db: Session = Depends(get_db),
 ) -> ProtectTrialResponse:
-    """Create a protected trial and a simulated, merchant-locked card."""
-
     try:
         trial, card = create_protected_trial(db, request)
     except ValueError as error:
@@ -324,16 +396,12 @@ def protect_trial(
         trial_id=trial.id,
         merchant_id=trial.merchant_id,
         card=card,
-        message=(
-            "Simulated trial protection enabled. This card is demo data only."
-        ),
+        message="TrialShield protection enabled. This is a simulated card only.",
     )
 
 
 @app.get("/trials", response_model=list[TrialResponse], tags=["trials"])
 def list_trials(db: Session = Depends(get_db)) -> list[Trial]:
-    """List protected trials, newest first."""
-
     try:
         return list(
             db.scalars(
@@ -351,8 +419,6 @@ def list_trials(db: Session = Depends(get_db)) -> list[Trial]:
 
 @app.get("/trials/{trial_id}", response_model=TrialResponse, tags=["trials"])
 def get_trial(trial_id: int, db: Session = Depends(get_db)) -> Trial:
-    """Return one protected trial and its simulated card."""
-
     try:
         trial = db.scalar(
             select(Trial)
@@ -370,40 +436,60 @@ def get_trial(trial_id: int, db: Session = Depends(get_db)) -> Trial:
     return trial
 
 
+@app.post(
+    "/trials/{trial_id}/cancel-attempt",
+    response_model=CancellationAttemptResponse,
+    tags=["trials"],
+)
+def cancel_attempt(
+    trial_id: int,
+    request: CancellationAttemptRequest,
+    db: Session = Depends(get_db),
+) -> CancellationAttemptResponse:
+    try:
+        result = record_cancellation_attempt(db, trial_id, request)
+        return CancellationAttemptResponse(**result)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except SQLAlchemyError as error:
+        raise HTTPException(
+            status_code=500,
+            detail="The cancellation attempt could not be recorded.",
+        ) from error
+
+
 @app.post("/trials/{trial_id}/freeze-card", tags=["trials"])
 def freeze_card(trial_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
-    """Freeze the simulated card as payment containment, not cancellation."""
-
     try:
         trial = db.get(Trial, trial_id)
         if trial is None:
             raise HTTPException(status_code=404, detail="Trial not found")
 
-        card = db.scalar(
-            select(VirtualCard).where(VirtualCard.trial_id == trial_id)
-        )
+        card = db.scalar(select(VirtualCard).where(VirtualCard.trial_id == trial_id))
         if card is None:
             raise HTTPException(status_code=404, detail="Virtual card not found")
 
         already_frozen = card.status.casefold() == "frozen"
         card.status = "frozen"
+
         if trial.status.casefold() != "cancelled":
             trial.status = "payment_blocked"
+            trial.cancellation_status = (
+                trial.cancellation_status
+                if trial.cancellation_status == "confirmed"
+                else "unresolved"
+            )
 
         if already_frozen:
             db.commit()
             db.refresh(trial)
             db.refresh(card)
         else:
-            # log_event commits the pending card/trial changes with the evidence.
             log_event(
                 db,
                 trial.id,
                 "PAYMENT_BLOCKED_FALLBACK",
-                (
-                    "Payment method frozen as fallback. "
-                    "Cancellation is not confirmed."
-                ),
+                "Payment method frozen as fallback. Cancellation is not confirmed.",
                 {
                     "card_id": card.id,
                     "card_status": card.status,
@@ -418,10 +504,10 @@ def freeze_card(trial_id: int, db: Session = Depends(get_db)) -> dict[str, objec
             "card_status": card.status,
             "already_frozen": already_frozen,
             "message": (
-                "Payment method frozen as fallback. "
-                "Cancellation is not confirmed."
+                "Payment method frozen as fallback. Cancellation is not confirmed."
             ),
         }
+
     except HTTPException:
         raise
     except SQLAlchemyError as error:
@@ -441,11 +527,10 @@ def list_audit_events(
     trial_id: int,
     db: Session = Depends(get_db),
 ) -> list[AuditEvent]:
-    """Return the evidence timeline for one protected trial."""
-
     try:
         if db.get(Trial, trial_id) is None:
             raise HTTPException(status_code=404, detail="Trial not found")
+
         return list(
             db.scalars(
                 select(AuditEvent)
@@ -453,6 +538,7 @@ def list_audit_events(
                 .order_by(AuditEvent.timestamp.asc(), AuditEvent.id.asc())
             ).all()
         )
+
     except HTTPException:
         raise
     except SQLAlchemyError as error:

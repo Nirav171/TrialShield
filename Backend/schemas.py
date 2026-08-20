@@ -9,9 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _validate_http_url(value: str) -> str:
-    """Accept only absolute HTTP(S) URLs with a hostname."""
-
-    parsed = urlparse(value.strip())
+    parsed = urlparse((value or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("source_url must be a valid http(s) URL")
     return value.strip()
@@ -23,24 +21,55 @@ class HealthCheck(BaseModel):
 
 
 class TrialPage(BaseModel):
-    """Structured trial information extracted by extension/content.js."""
-
     schema_version: str | None = None
     source_url: str
     provider_name: str = Field(min_length=1, max_length=255)
     page_title: str | None = None
+
     has_free_trial: bool = False
     trial_start: str | None = None
     trial_duration: str | None = None
     cancellation_terms: str | None = None
     minimum_fee: str | None = None
+    recurring_charge: str | None = None
     payment_method_required: bool | None = None
     auto_renews: bool | None = None
     currency: str | None = None
-    evidence: list[str] = Field(default_factory=list)
+
+    evidence: list[str] = Field(default_factory=list, max_length=20)
     analyzed_at: str | None = None
 
-    validate_source_url = field_validator("source_url")(_validate_http_url)
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url(cls, value: str) -> str:
+        return _validate_http_url(value)
+
+
+class EvidenceAnalysisRequest(BaseModel):
+    source_url: str | None = None
+    page_title: str | None = None
+    evidence: list[str] = Field(default_factory=list, max_length=40)
+
+    @field_validator("source_url")
+    @classmethod
+    def validate_optional_source_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_http_url(value)
+
+
+class EvidenceFlag(BaseModel):
+    code: str
+    label: str
+    severity: str
+    explanation: str
+    evidence: str | None = None
+
+
+class EvidenceAnalysisResponse(BaseModel):
+    source_url: str | None = None
+    flags: list[EvidenceFlag]
+    summary: str
 
 
 class PageAnalysisResponse(BaseModel):
@@ -48,6 +77,7 @@ class PageAnalysisResponse(BaseModel):
     completeness_score: int
     missing_fields: list[str]
     warnings: list[str]
+    evidence_flags: list[EvidenceFlag]
 
 
 class RiskFactor(BaseModel):
@@ -81,9 +111,12 @@ class ProtectTrialRequest(BaseModel):
     currency: str = Field(default="USD", min_length=1, max_length=10)
     billing_frequency: str = Field(default="unknown", min_length=1, max_length=50)
     risk_score: float = Field(default=0.0, ge=0, le=100)
-    evidence: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list, max_length=20)
 
-    validate_source_url = field_validator("source_url")(_validate_http_url)
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url(cls, value: str) -> str:
+        return _validate_http_url(value)
 
 
 class VirtualCardResponse(BaseModel):
@@ -104,6 +137,34 @@ class ProtectTrialResponse(BaseModel):
     trial_id: int
     merchant_id: int
     card: VirtualCardResponse
+    message: str
+
+
+class CancellationAttemptRequest(BaseModel):
+    source_url: str | None = None
+    page_title: str | None = None
+    attempted_actions: list[str] = Field(default_factory=list, max_length=20)
+    evidence: list[str] = Field(default_factory=list, max_length=40)
+    confirmation_detected: bool = False
+    final_url: str | None = None
+    raw_status: str | None = None
+    reason: str | None = None
+
+    @field_validator("source_url", "final_url")
+    @classmethod
+    def validate_optional_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_http_url(value)
+
+
+class CancellationAttemptResponse(BaseModel):
+    trial_id: int
+    status: str
+    cancellation_status: str
+    card_status: str | None
+    confirmed: bool
+    audit_event_id: int
     message: str
 
 
@@ -133,3 +194,18 @@ class TrialResponse(BaseModel):
     cancellation_status: str
     created_at: datetime
     virtual_card: VirtualCardResponse | None = None
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=200)
+
+
+class SearchResult(BaseModel):
+    name: str
+    url: str
+    description: str
+
+
+class SearchResponse(BaseModel):
+    results: list[SearchResult]
+    source: str

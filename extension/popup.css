@@ -8,7 +8,7 @@
 * { box-sizing: border-box; }
 
 body {
-  width: 380px;
+  width: 390px;
   min-height: 260px;
   margin: 0;
 }
@@ -26,8 +26,18 @@ h2 { font-size: 15px; }
 }
 
 .subtitle { margin: 4px 0 18px; }
-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
-.search-row { display: flex; gap: 8px; }
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.search-row {
+  display: flex;
+  gap: 8px;
+}
 
 input {
   min-width: 0;
@@ -38,7 +48,10 @@ input {
   font: inherit;
 }
 
-input:focus { outline: 2px solid #97b3ef; outline-offset: 1px; }
+input:focus {
+  outline: 2px solid #97b3ef;
+  outline-offset: 1px;
+}
 
 button {
   border: 0;
@@ -52,7 +65,17 @@ button {
 
 button:hover { background: #284f9f; }
 
-.results { margin: 10px 0 0; padding: 0; list-style: none; }
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.results {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
 .results li { border-top: 1px solid #e1e4ea; }
 
 .result-link {
@@ -62,8 +85,17 @@ button:hover { background: #284f9f; }
   text-decoration: none;
 }
 
-.result-link:hover strong { color: #315fbd; text-decoration: underline; }
-.result-link span { display: block; margin-top: 2px; color: #606a7c; font-size: 12px; }
+.result-link:hover strong {
+  color: #315fbd;
+  text-decoration: underline;
+}
+
+.result-link span {
+  display: block;
+  margin-top: 2px;
+  color: #606a7c;
+  font-size: 12px;
+}
 
 .details {
   margin-top: 16px;
@@ -71,28 +103,42 @@ button:hover { background: #284f9f; }
   padding-top: 14px;
 }
 
-.protect-button {
+.protect-button,
+.danger-button {
   width: 100%;
   margin-top: 14px;
 }
 
-.protect-button:disabled {
-  cursor: wait;
-  opacity: 0.7;
+.danger-button {
+  background: #a3342f;
 }
 
-dl { margin: 8px 0 0; font-size: 12px; }
-dt { margin-top: 7px; color: #606a7c; font-weight: 600; }
-dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.danger-button:hover {
+  background: #872924;
+}
 
-/* --- Monitoring dashboard (Phase 3) ------------------------------------ */
+dl {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+dt {
+  margin-top: 7px;
+  color: #606a7c;
+  font-weight: 600;
+}
+
+dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
 
 .monitor {
   border: 1px solid #dfe3ea;
   border-radius: 8px;
   padding: 12px 14px;
   background: #ffffff;
-  margin-bottom: 4px;
+  margin-bottom: 14px;
 }
 
 .monitor-header {
@@ -181,4 +227,22 @@ dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 #monitor-lastscan {
   margin: 10px 0 0;
   font-size: 11px;
+}
+
+.audit-panel {
+  margin-top: 14px;
+  border-top: 1px solid #dfe3ea;
+  padding-top: 12px;
+}
+
+.audit-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: #30384a;
+}
+
+.audit-list li {
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
 }

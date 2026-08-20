@@ -9,7 +9,7 @@
   <body>
     <main>
       <h1>TrialShield</h1>
-      <p class="subtitle">Find a free trial and review its terms.</p>
+      <p class="subtitle">Analyze trial risk, protect with a simulated card, and record evidence.</p>
 
       <section id="monitor" class="monitor">
         <div class="monitor-header">
@@ -43,7 +43,7 @@
       </section>
 
       <form id="search-form" role="search">
-        <label for="search-input">Search free trials</label>
+        <label for="search-input">Search free trials with Gemini</label>
         <div class="search-row">
           <input
             id="search-input"
@@ -59,13 +59,24 @@
       <ul id="results" class="results"></ul>
 
       <section id="trial-details" class="details" hidden>
-        <h2>Detailed page analysis</h2>
+        <h2>Page analysis</h2>
         <p id="analysis-status" class="status">Analyzing page…</p>
         <dl id="details-list"></dl>
+
         <button id="protect-trial" class="protect-button" type="button" hidden>
           Protect this trial
         </button>
+
+        <button id="cancel-trial" class="danger-button" type="button" hidden>
+          Try automatic cancellation
+        </button>
+
         <p id="protection-status" class="status" aria-live="polite"></p>
+
+        <section id="audit-panel" class="audit-panel" hidden>
+          <h2>Evidence log</h2>
+          <ul id="audit-list" class="audit-list"></ul>
+        </section>
       </section>
     </main>
 
