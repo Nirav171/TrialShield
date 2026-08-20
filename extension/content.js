@@ -20,10 +20,77 @@
     return fallback;
   }
 
-  function nearbyEvidence(text) {
+  // --- Negation-aware detection ---------------------------------------------
+  // A plain keyword hit like "free trial" also matches sentences such as
+  // "Spotify doesn't offer a free trial", "no free trial available", or
+  // "there isn't a trial for this plan". This checks a small window of text
+  // immediately before (and within) the matched sentence for a negator, and
+  // discounts/drops matches that are actually negative statements.
+  const NEGATION_WINDOW = /\b(no|not|n't|never|without|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|won't|can't|cannot|unavailable|discontinued|ended|removed|no longer)\b[^.!?\n]{0,40}$/i;
+
+  function isNegatedContext(text, matchIndex) {
+    const start = Math.max(0, matchIndex - 60);
+    const window = text.slice(start, matchIndex);
+    return NEGATION_WINDOW.test(window);
+  }
+
+  // Returns true only if the pattern matches somewhere in `text` AND that
+  // specific occurrence is not preceded by a negator in the same sentence.
+  function detectPositive(text, pattern) {
+    const re = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      if (!isNegatedContext(text, match.index)) return true;
+      if (match.index === re.lastIndex) re.lastIndex++; // avoid infinite loop on zero-width matches
+    }
+    return false;
+  }
+
+  // --- "Free trial" vs. "free plan" disambiguation ---------------------------
+  // A page can say "free trial" in passing (nav links, comparisons, a trial
+  // offered only on paid tiers) while the plan actually relevant to the
+  // visitor is a permanently-free plan ($0, no card, no expiry). We only want
+  // to flag a genuine free TRIAL: a temporary offer that is expected to
+  // convert to a paid charge. So a raw keyword hit is not enough — we also
+  // require some corroborating "this will eventually cost money" signal, and
+  // we let explicit "free forever" language veto a bare keyword hit.
+  const FREE_FOREVER_PATTERN =
+    /free forever|forever free|always free|100% free|completely free|free version\b|free tier\b(?!.*trial)|free plan\b(?!.*trial)|no credit card,? ever|free,? no strings attached|free for as long as you (?:like|want)/i;
+
+  const TRIAL_CONVERSION_SIGNAL =
+    /(?:then|after (?:that|your trial|the trial)|once (?:the |your )?trial (?:ends?|is over)|renews? at|billed at|you'?ll be charged|will be charged|automatically (?:renews?|converts?) (?:to|into) (?:the )?(?:paid|premium|full))\s*[:\-]?\s*(?:[$€£₹]\s?\d+(?:[.,]\d{1,2})?)?/i;
+
+  function hasTrialCorroboration(text, { duration, paymentRequired, autoRenews, fee } = {}) {
+    if (paymentRequired === true || autoRenews === true) return true;
+    if (duration) return true;
+    if (fee && TRIAL_CONVERSION_SIGNAL.test(text)) return true;
+    return TRIAL_CONVERSION_SIGNAL.test(text);
+  }
+
+  // Decides whether a page describes a genuine free TRIAL (temporary, expected
+  // to convert to a paid charge) as opposed to a plan that is simply free.
+  function isGenuineFreeTrial(text, signals) {
+    const keywordHit = detectPositive(text, /free trial|trial period|try (?:it )?free/i);
+    if (!keywordHit) return false;
+    const explicitlyFreeForever = detectPositive(text, FREE_FOREVER_PATTERN);
+    const corroborated = hasTrialCorroboration(text, signals);
+    // A page that explicitly claims to be free forever AND has no signal that
+    // money will eventually be charged is treated as a free plan, not a trial.
+    if (explicitlyFreeForever && !corroborated) return false;
+    return corroborated;
+  }
+
+  // Evidence sentences must show real "this costs money eventually" signal,
+  // not just any sentence that happens to contain the word "trial" or
+  // "cancel" (that was pulling in unrelated page text as "evidence").
+  const EVIDENCE_SENTENCE_PATTERN =
+    /free trial|trial period|\d+[\s-]*(?:day|week|month)s?[\s-]*trial|auto.?renew|payment method required|(?:credit|debit) card required|charged (?:automatically|after)|then\s*(?:[$€£₹]\s?\d+)|renews? at\s*(?:[$€£₹]\s?\d+)/i;
+
+  function nearbyEvidence(text, isTrial) {
+    if (!isTrial) return [];
     return text
       .split(/(?<=[.!?])\s+|\n+/)
-      .filter((sentence) => /free trial|trial period|cancel|auto.?renew|payment method|credit card/i.test(sentence))
+      .filter((sentence) => EVIDENCE_SENTENCE_PATTERN.test(sentence))
       .map((sentence) => sentence.trim().slice(0, 300))
       .filter((sentence, index, all) => sentence && all.indexOf(sentence) === index)
       .slice(0, MAX_EVIDENCE);
@@ -46,7 +113,6 @@
 
   function analyzeTrialPage() {
     const text = normalizedPageText();
-    const evidence = nearbyEvidence(text);
     const duration = firstMatch(text, [
       /(?:free\s+)?trial(?:\s+period)?(?:\s+(?:for|of|lasts?))?\s+(\d+\s*(?:day|week|month)s?)/i,
       /(\d+\s*(?:day|week|month)s?)\s+(?:free\s+)?trial/i
@@ -70,13 +136,15 @@
       : /does not automatically renew|no auto.?renewal/i.test(text)
         ? false
         : null;
+    const hasFreeTrial = isGenuineFreeTrial(text, { duration, paymentRequired, autoRenews, fee });
+    const evidence = nearbyEvidence(text, hasFreeTrial);
 
     return {
       schema_version: "1.0",
       source_url: location.href,
       provider_name: document.querySelector('meta[property="og:site_name"]')?.content || location.hostname.replace(/^www\./, ""),
       page_title: document.title || null,
-      has_free_trial: /free trial|trial period|try (?:it )?free/i.test(text),
+      has_free_trial: hasFreeTrial,
       trial_start: start,
       trial_duration: duration,
       cancellation_terms: cancellation,
@@ -154,6 +222,57 @@
   // Phase 2 constants: trial / payment / renewal / cancellation detection.
   // ---------------------------------------------------------------------
   const CURRENCY_SYMBOL_PATTERN = /[$€£₹]/;
+
+  // --- Negation-aware detection (see identical helper in the analyzer IIFE
+  // above) — duplicated here since this monitor runs in its own closure and
+  // has no access to that scope. Prevents "doesn't offer a free trial",
+  // "no free trial available", etc. from being reported as a positive hit.
+  const MONITOR_NEGATION_WINDOW = /\b(no|not|n't|never|without|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|won't|can't|cannot|unavailable|discontinued|ended|removed|no longer)\b[^.!?\n]{0,40}$/i;
+
+  function monitorIsNegatedContext(text, matchIndex) {
+    const start = Math.max(0, matchIndex - 60);
+    const window = text.slice(start, matchIndex);
+    return MONITOR_NEGATION_WINDOW.test(window);
+  }
+
+  function detectPositive(text, pattern) {
+    const re = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      if (!monitorIsNegatedContext(text, match.index)) return true;
+      if (match.index === re.lastIndex) re.lastIndex++;
+    }
+    return false;
+  }
+
+  // --- "Free trial" vs. "free plan" disambiguation (see identical helper in
+  // the analyzer IIFE above; duplicated because this monitor has its own
+  // closure). A bare "free trial" keyword hit is not enough to flag a trial —
+  // it must be corroborated by a signal that money will eventually be
+  // charged, and explicit "free forever" language can veto an uncorroborated
+  // hit so permanently-free plans aren't reported as trials.
+  const MONITOR_FREE_FOREVER_PATTERN =
+    /free forever|forever free|always free|100% free|completely free|free version\b|free tier\b(?!.*trial)|free plan\b(?!.*trial)|no credit card,? ever|free,? no strings attached|free for as long as you (?:like|want)/i;
+
+  const MONITOR_TRIAL_CONVERSION_SIGNAL =
+    /(?:then|after (?:that|your trial|the trial)|once (?:the |your )?trial (?:ends?|is over)|renews? at|billed at|you'?ll be charged|will be charged|automatically (?:renews?|converts?) (?:to|into) (?:the )?(?:paid|premium|full))\s*[:\-]?\s*(?:[$€£₹]\s?\d+(?:[.,]\d{1,2})?)?/i;
+
+  function monitorIsGenuineFreeTrial(text, { duration, paymentRequired, automaticRenewal, priceAfterTrial } = {}) {
+    const keywordHit = detectPositive(
+      text,
+      /free trial|trial period|try (?:it |this )?free|start(?:ing)? your trial|\d+[\s-]*(?:day|week|month)s?[\s-]*trial|trial ends?\b/i
+    );
+    if (!keywordHit) return false;
+    const corroborated =
+      paymentRequired === true ||
+      automaticRenewal === true ||
+      Boolean(duration) ||
+      Boolean(priceAfterTrial) ||
+      MONITOR_TRIAL_CONVERSION_SIGNAL.test(text);
+    const explicitlyFreeForever = detectPositive(text, MONITOR_FREE_FOREVER_PATTERN);
+    if (explicitlyFreeForever && !corroborated) return false;
+    return corroborated;
+  }
 
   const CANCELLATION_STEPS = [
     {
@@ -258,7 +377,7 @@
   }
 
   function clip(str) {
-    return redactSensitiveNumbers(str.trim().replace(/\s+/g, " ")).slice(0, MAX_ITEM_LENGTH);
+    return redactSensitiveText(String(str || "").trim().replace(/\s+/g, " ")).slice(0, MAX_ITEM_LENGTH);
   }
 
   function dedupePush(list, value) {
@@ -312,7 +431,15 @@
   }
 
   function hasPaymentForm() {
-    return !!document.querySelector(SENSITIVE_FIELD_SELECTOR);
+    return !!document.querySelector([
+      'input[autocomplete="cc-number"]',
+      'input[autocomplete="cc-exp"]',
+      'input[autocomplete="cc-csc"]',
+      'input[name*="card" i]',
+      'input[id*="card" i]',
+      'input[name*="billing" i]',
+      'input[id*="billing" i]'
+    ].join(','));
   }
 
   function classifyPageType(relevantText) {
@@ -364,8 +491,6 @@
 
   // --- Trial detection -----------------------------------------------------
   function analyzeTrial(text) {
-    const detected = /free trial|trial period|try (?:it |this )?free|start(?:ing)? your trial|\d+[\s-]*(?:day|week|month)s?[\s-]*trial|trial ends?\b/i.test(text);
-
     const duration = firstMatch(text, [
       /(?:free\s+)?trial(?:\s+period)?(?:\s+(?:for|of|lasts?))?\s+(\d+\s*(?:day|week|month)s?)/i,
       /(\d+\s*(?:day|week|month)s?)\s+(?:free\s+)?trial/i
@@ -395,19 +520,37 @@
         ? false
         : null;
 
+    const detected = monitorIsGenuineFreeTrial(text, { duration, paymentRequired, automaticRenewal, priceAfterTrial });
+
     return { detected, duration, priceAfterTrial, currency, billingFrequency, paymentRequired, automaticRenewal };
   }
 
   // --- Payment page detection ----------------------------------------------
-  function analyzePayment(text, pageType, paymentFormPresent) {
+  function analyzePayment(text, pageType, paymentFormPresent, paymentMeta = {}) {
     const contextualHit = /payment method|credit card|debit card|billing address|card details|\bsubscribe\b|checkout|\bpay\b|billing/i.test(text);
     const pageDetected = pageType === "payment" || pageType === "checkout" || paymentFormPresent || contextualHit;
     const methodRequired = paymentFormPresent
       ? true
       : /payment method required|valid payment method|card required/i.test(text)
         ? true
-        : null;
-    return { pageDetected, methodRequired };
+        : /no (?:credit )?card required/i.test(text)
+          ? false
+          : null;
+
+    const subscriptionPrice = firstMatch(text, [
+      /(?:subscription|plan|membership|renews?|billed|charged)[^\n.]{0,120}?((?:[$€£₹]\s?\d+(?:[.,]\d{1,2})?)(?:\s*\/\s*(?:mo|month|yr|year|wk|week))?)/i,
+      /((?:[$€£₹]\s?\d+(?:[.,]\d{1,2})?)\s*\/\s*(?:mo|month|yr|year|wk|week))/i
+    ]);
+
+    const billingFrequency = firstMatch(text, [
+      /\/\s*(month|mo|year|yr|week|wk)\b/i,
+      /\b(monthly|annually|yearly|weekly)\b/i
+    ], null)?.toLowerCase().replace(/^mo$/, "month").replace(/^yr$/, "year").replace(/^wk$/, "week") || null;
+
+    const billingAddress = paymentMeta.billingAddress ?? /\bbilling (?:address|details|information)\b/i.test(text);
+    const cardAvailable = paymentMeta.cardAvailable ?? /\b(?:credit|debit) card\b|\bcard details\b/i.test(text);
+
+    return { pageDetected, methodRequired, cardAvailable, billingAddress, subscriptionPrice, billingFrequency };
   }
 
   // --- Renewal detection -----------------------------------------------------
@@ -426,15 +569,193 @@
     return found;
   }
 
+  function redactSensitiveText(text) {
+    return String(text || "")
+      // Card-number-like runs.
+      .replace(/\b(?:\d[ -]?){12,19}\d\b/g, "[redacted]")
+      // Common authentication-code forms.
+      .replace(/\b(otp|one[- ]time code|verification code|authentication code)\s*[:#-]?\s*\d{4,8}\b/gi, (_match, label) => `${label} [redacted]`)
+      // Never persist password/PIN/CVV/CVC values even if a site echoes them in visible text.
+      .replace(/\b(pin|passcode|password|cvv|cvc)\s*[:#-]?[^.!?\n]{0,120}/gi, (_match, label) => `${label} [redacted]`)
+      .replace(/\b(?:secret|private key|access token|session token)\s*[:#-]?[^.!?\n]{0,120}/gi, (_match, label) => `${label} [redacted]`);
+  }
+
+  function redactedVisibleText(text, max = 6000) {
+    return redactSensitiveText(text).slice(0, max);
+  }
+
+  function visibleElements(selector, limit = 60) {
+    return Array.from(document.querySelectorAll(selector))
+      .filter(isVisible)
+      .slice(0, limit);
+  }
+
+  function collectWebsitePageMetadata(bodyText) {
+    const headings = visibleElements("h1, h2, h3", 30)
+      .map((el) => clip(el.innerText || ""))
+      .filter(Boolean);
+
+    const buttons = visibleElements("button, input[type=submit], [role=button]", 50)
+      .map((el) => clip(el.innerText || el.getAttribute("aria-label") || el.getAttribute("title") || el.value || ""))
+      .filter(Boolean);
+
+    const links = visibleElements("a[href]", 80)
+      .map((el) => {
+        const href = el.getAttribute("href");
+        const label = el.innerText || el.getAttribute("aria-label") || el.getAttribute("title") || "";
+        if (!href || /^(mailto:|tel:|javascript:|data:|blob:)/i.test(href)) return null;
+        try {
+          const resolved = new URL(href, location.href);
+          return { label: clip(label), url: resolved.toString().slice(0, 1000) };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    const labels = visibleElements("label, [aria-label]", 50)
+      .map((el) => clip(el.innerText || el.getAttribute("aria-label") || ""))
+      .filter(Boolean);
+
+    const formLabels = [];
+    const paymentInputs = { card: false, billingAddress: false };
+    visibleElements("form", 25).forEach((form) => {
+      Array.from(form.querySelectorAll("label, legend, [aria-label]"))
+        .filter(isVisible)
+        .slice(0, 40)
+        .forEach((el) => {
+          const label = clip(el.innerText || el.getAttribute("aria-label") || "");
+          if (label && !formLabels.includes(label) && formLabels.length < 80) formLabels.push(label);
+        });
+
+      // Read only non-secret field metadata, never .value.
+      Array.from(form.querySelectorAll("input, select, textarea")).forEach((input) => {
+        const type = String(input.getAttribute("type") || "").toLowerCase();
+        const autocomplete = String(input.getAttribute("autocomplete") || "").toLowerCase();
+        const name = String(input.getAttribute("name") || "").toLowerCase();
+        const id = String(input.getAttribute("id") || "").toLowerCase();
+        if (autocomplete === "cc-number" || type === "card" || /card.?number|credit.?card|debit.?card/.test(name + " " + id)) {
+          paymentInputs.card = true;
+        }
+        if (/street|address|postal|zip|city|state|country/.test(autocomplete) || /billing.?address|address.?1|postal|zip/.test(name + " " + id)) {
+          paymentInputs.billingAddress = true;
+        }
+      });
+    });
+
+    return {
+      headings: [...new Set(headings)].slice(0, 30),
+      buttons: [...new Set(buttons)].slice(0, 50),
+      links: links.slice(0, 80),
+      labels: [...new Set(labels)].slice(0, 50),
+      formLabels: [...new Set(formLabels)].slice(0, 80),
+      paymentInputs,
+      visibleText: redactedVisibleText(relevantText.join("\n"), 6000)
+    };
+  }
+
+  function detectAccessState(text) {
+    const passwordField = !!document.querySelector('input[type="password"]');
+    const loginLanguage = /\b(?:sign in|log in|login|member login|account login)\b/i.test(text);
+    const blockedLanguage = /access denied|forbidden|request blocked|verify you are human|enable javascript to continue|checking your browser/i.test(text);
+
+    if (blockedLanguage) {
+      return { status: "blocked_or_protected", requiresManualVisit: true };
+    }
+    if (passwordField && loginLanguage) {
+      return { status: "login_required", requiresManualVisit: true };
+    }
+    return { status: "accessible", requiresManualVisit: false };
+  }
+
+  function analyzeWebsitePage() {
+    const bodyText = document.body?.innerText || "";
+    const metadata = collectWebsitePageMetadata(bodyText);
+    const relevantText = collectRelevantText(bodyText);
+    const pageType = classifyPageType(relevantText);
+    const access = detectAccessState(bodyText);
+    const trialInfo = analyzeTrial([document.title || "", location.href, bodyText, ...relevantText].join(" "));
+    const paymentFormPresent = hasPaymentForm();
+    const paymentInfo = analyzePayment(
+      [document.title || "", location.href, bodyText, ...metadata.labels, ...metadata.formLabels].join(" "),
+      pageType,
+      paymentFormPresent,
+      {
+        cardAvailable: metadata.paymentInputs.card || /\b(?:credit|debit) card\b|\bcard details\b/i.test(bodyText),
+        billingAddress: metadata.paymentInputs.billingAddress || /\bbilling (?:address|details|information)\b/i.test(bodyText)
+      }
+    );
+    const renewalInfo = analyzeRenewal(trialInfo);
+    const cancellationSteps = detectCancellationStepsOnPage(bodyText + " " + metadata.buttons.join(" ") + " " + metadata.labels.join(" "));
+    const meaningfulTextLength = bodyText.replace(/\s+/g, " ").trim().length;
+    const requiresManualVisit = access.requiresManualVisit || meaningfulTextLength < 40;
+
+    return {
+      schemaVersion: "3.0",
+      url: location.href,
+      normalizedUrl: (() => { try { const u = new URL(location.href); u.hash = ""; return u.toString(); } catch { return location.href; } })(),
+      title: document.title || null,
+      pageType,
+      access: { ...access, requiresManualVisit },
+      metadata,
+      findings: {
+        trial: {
+          detected: trialInfo.detected,
+          duration: trialInfo.duration,
+          start: firstMatch(bodyText, [/trial (?:starts?|begins?)\s+(today|immediately|on[^.\n]{1,60})/i, /(starts? (?:today|immediately|when you (?:sign up|subscribe)))/i], trialInfo.duration ? "When signup is completed" : null),
+          priceAfterTrial: trialInfo.priceAfterTrial,
+          paymentRequired: trialInfo.paymentRequired
+        },
+        payment: {
+          pageDetected: paymentInfo.pageDetected,
+          required: paymentInfo.methodRequired,
+          cardAvailable: paymentInfo.cardAvailable,
+          billingAddress: paymentInfo.billingAddress,
+          subscriptionPrice: paymentInfo.subscriptionPrice,
+          billingFrequency: paymentInfo.billingFrequency
+        },
+        renewal: {
+          automatic: renewalInfo.automatic,
+          price: renewalInfo.price
+        },
+        cancellation: {
+          detected: cancellationSteps.length > 0,
+          steps: cancellationSteps
+        },
+        subscription: {
+          detected: /subscription|membership|manage plan|manage subscription/i.test([document.title || "", location.href, bodyText].join(" ")),
+          price: paymentInfo.subscriptionPrice || trialInfo.priceAfterTrial,
+          billingFrequency: paymentInfo.billingFrequency || trialInfo.billingFrequency
+        }
+      },
+      cancellation: {
+        found: cancellationSteps.length > 0,
+        steps: cancellationSteps
+      },
+      requiresManualVisit,
+      analyzedAt: new Date().toISOString()
+    };
+  }
+
   function hostnameKey() {
     return location.hostname.replace(/^www\./, "") || "unknown-site";
   }
 
+  // Bump this whenever detection logic changes in a way that could flip a
+  // previously-stored true/false verdict (e.g. the negation-awareness fix
+  // below). Sessions persist in chrome.storage.local and use "sticky"
+  // semantics (see mergeJourney), so a session built under an older,
+  // buggier detector would otherwise keep a stale "Free trial detected"
+  // forever, even after the code is fixed and even after the current page
+  // is re-scanned, because sticky merging never un-sets a true value.
+  const DETECTOR_VERSION = 2;
+
   function emptySession() {
     return {
+      detectorVersion: DETECTOR_VERSION,
       currentSite: {},
       trial: { detected: false, duration: null, priceAfterTrial: null, currency: null, billingFrequency: null, paymentRequired: null, automaticRenewal: null },
-      payment: { pageDetected: false, methodRequired: null },
+      payment: { pageDetected: false, methodRequired: null, cardAvailable: null, billingAddress: null, subscriptionPrice: null, billingFrequency: null },
       renewal: { automatic: null, price: null },
       // Current account plan, as opposed to the trial/renewal terms above.
       // null = not yet determined; "free" or "paid" once a confident
@@ -479,9 +800,16 @@
 
     // Payment
     const paymentFormPresent = hasPaymentForm();
-    const paymentInfo = analyzePayment(text, snapshot.pageType, paymentFormPresent);
+    const paymentInfo = analyzePayment(text, snapshot.pageType, paymentFormPresent, {
+      cardAvailable: /\b(?:credit|debit) card\b|\bcard details\b/i.test(text),
+      billingAddress: /\bbilling (?:address|details|information)\b/i.test(text)
+    });
     if (paymentInfo.pageDetected) session.payment.pageDetected = true;
     if (paymentInfo.methodRequired !== null) session.payment.methodRequired = paymentInfo.methodRequired;
+    if (paymentInfo.cardAvailable) session.payment.cardAvailable = true;
+    if (paymentInfo.billingAddress) session.payment.billingAddress = true;
+    session.payment.subscriptionPrice = paymentInfo.subscriptionPrice || session.payment.subscriptionPrice;
+    session.payment.billingFrequency = paymentInfo.billingFrequency || session.payment.billingFrequency;
 
     // Renewal (derived from trial info, kept as its own top-level field per spec)
     const renewalInfo = analyzeRenewal(session.trial);
@@ -584,15 +912,18 @@
       const key = `trialshield_state:${hostnameKey()}`;
       try {
         const stored = await chrome.storage.local.get(key);
-        const session = stored[key] ? { ...emptySession(), ...stored[key] } : emptySession();
+        const staleDetector = stored[key] && stored[key].detectorVersion !== DETECTOR_VERSION;
+        const base = (stored[key] && !staleDetector) ? stored[key] : emptySession();
+        const session = { ...emptySession(), ...base };
         // Deep-merge nested objects that were spread shallowly above.
-        session.trial = { ...emptySession().trial, ...(stored[key]?.trial || {}) };
-        session.payment = { ...emptySession().payment, ...(stored[key]?.payment || {}) };
-        session.renewal = { ...emptySession().renewal, ...(stored[key]?.renewal || {}) };
-        session.plan = { ...emptySession().plan, ...(stored[key]?.plan || {}) };
-        session.cancellation = { ...emptySession().cancellation, ...(stored[key]?.cancellation || {}) };
-        session.timeline = stored[key]?.timeline || [];
-        session.loggedEvents = stored[key]?.loggedEvents || [];
+        session.trial = { ...emptySession().trial, ...(base.trial || {}) };
+        session.payment = { ...emptySession().payment, ...(base.payment || {}) };
+        session.renewal = { ...emptySession().renewal, ...(base.renewal || {}) };
+        session.plan = { ...emptySession().plan, ...(base.plan || {}) };
+        session.cancellation = { ...emptySession().cancellation, ...(base.cancellation || {}) };
+        session.timeline = base.timeline || [];
+        session.loggedEvents = base.loggedEvents || [];
+        session.detectorVersion = DETECTOR_VERSION;
 
         const updated = mergeJourney(session, snapshot, bodyText);
         await chrome.storage.local.set({ [key]: updated });
@@ -616,6 +947,15 @@
       timestamp: Date.now()
     };
   }
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== "TRIALSHIELD_ANALYZE_WEBSITE_PAGE") return;
+    try {
+      sendResponse({ ok: true, analysis: analyzeWebsitePage() });
+    } catch (error) {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : "Website analysis unavailable" });
+    }
+  });
 
   function scanAndMaybeUpdate() {
     const now = Date.now();

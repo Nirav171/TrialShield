@@ -48,7 +48,12 @@ function Find-Trials {
     $prompt = @"
 Use Google Search to find exactly five legitimate official websites offering a
 free trial relevant to this user search: $($Query | ConvertTo-Json -Compress).
-Only include a result when its official page currently mentions a free trial.
+Only include a result when its official page currently mentions a free trial
+AND that free trial is available to users signing up from India (Indian
+pricing page, INR pricing, or an India-eligible plan). Exclude any result
+where the trial is restricted to other countries/regions or where the page
+indicates India is excluded. If you cannot confirm India eligibility for a
+provider, skip it rather than including it.
 Return only JSON in this exact shape:
 {"results":[{"name":"Provider or product","url":"https://official.example/trial","description":"Short trial summary"}]}
 Use direct HTTPS provider pages, never search-result, affiliate, coupon, blog,

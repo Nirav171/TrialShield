@@ -8,47 +8,55 @@
   </head>
   <body>
     <main>
-      <h1>TrialShield</h1>
-      <p class="subtitle">Find a free trial and review its terms.</p>
+      <header class="app-header">
+        <div>
+          <h1>TrialShield</h1>
+          <p class="subtitle">Know the trial terms before you subscribe.</p>
+        </div>
+        <span id="monitor-status" class="monitor-status compact-status">
+          <span id="monitor-dot" class="dot dot-idle" aria-hidden="true"></span>
+          <span id="monitor-status-text">Not monitored</span>
+        </span>
+      </header>
 
-      <section id="monitor" class="monitor">
-        <div class="monitor-header">
-          <p id="monitor-page-type" class="current-page">Current page: —</p>
-          <span id="monitor-status" class="monitor-status">
-            <span id="monitor-dot" class="dot dot-idle" aria-hidden="true"></span>
-            <span id="monitor-status-text">Not monitored yet</span>
-          </span>
+      <section id="monitor" class="monitor-card" aria-label="Website protection status">
+        <div class="site-context">
+          <span class="eyebrow">CURRENT WEBSITE</span>
+          <p id="monitor-page-type" class="current-page">—</p>
         </div>
 
         <ul id="monitor-alerts" class="alerts" aria-live="polite"></ul>
 
-        <dl class="monitor-grid">
-          <dt>Plan</dt>
-          <dd id="monitor-plan">No plan information yet</dd>
+        <div class="quick-findings" aria-label="Subscription findings">
+          <div class="quick-finding">
+            <span>Trial</span>
+            <strong id="monitor-trial">Not found yet</strong>
+          </div>
+          <div class="quick-finding">
+            <span>Payment</span>
+            <strong id="monitor-payment">Not found yet</strong>
+          </div>
+          <div class="quick-finding">
+            <span>Renewal</span>
+            <strong id="monitor-renewal">Not found yet</strong>
+          </div>
+          <div class="quick-finding">
+            <span>Cancel</span>
+            <strong id="monitor-cancellation">Not observed yet</strong>
+          </div>
+        </div>
 
-          <dt>Trial</dt>
-          <dd id="monitor-trial">No trial information yet</dd>
-
-          <dt>Payment</dt>
-          <dd id="monitor-payment">No payment information yet</dd>
-
-          <dt>Renewal</dt>
-          <dd id="monitor-renewal">No renewal information yet</dd>
-
-          <dt>Cancellation</dt>
-          <dd id="monitor-cancellation">No cancellation flow observed yet</dd>
-        </dl>
-
+        <div id="monitor-plan" class="plan-note">No plan information yet</div>
         <p id="monitor-lastscan" class="status"></p>
       </section>
 
-      <form id="search-form" role="search">
-        <label for="search-input">Search free trials</label>
+      <form id="search-form" class="search-panel" role="search">
+        <label for="search-input">Find a free trial</label>
         <div class="search-row">
           <input
             id="search-input"
             type="search"
-            placeholder="Try music, design, streaming..."
+            placeholder="Music, design, streaming..."
             autocomplete="off"
           />
           <button type="submit">Search</button>
@@ -58,11 +66,43 @@
       <p id="result-count" class="status" aria-live="polite"></p>
       <ul id="results" class="results"></ul>
 
-      <section id="trial-details" class="details" hidden>
-        <h2>Detailed page analysis</h2>
+      <section id="site-scan" class="site-scan" aria-label="Website scan">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">DEEP SCAN</span>
+            <h2>Check the whole website</h2>
+            <p id="site-scan-status" class="status">Find trial, payment, renewal and cancellation pages.</p>
+          </div>
+          <button id="site-scan-start" class="primary-action" type="button">Scan</button>
+        </div>
+
+        <div class="scan-counts" aria-live="polite">
+          <span id="scan-count-discovered">0 pages</span>
+          <span id="scan-count-analyzed">0 analyzed</span>
+          <span id="scan-count-relevant">0 relevant</span>
+        </div>
+
+        <div class="scan-summary">
+          <div class="finding-row"><strong>Trial</strong><p id="scan-trial-summary">No trial information yet.</p></div>
+          <div class="finding-row"><strong>Payment</strong><p id="scan-payment-summary">No payment information yet.</p></div>
+          <div class="finding-row"><strong>Renewal</strong><p id="scan-renewal-summary">No renewal information yet.</p></div>
+          <div class="finding-row"><strong>Cancellation</strong><p id="scan-cancellation-summary">Cancellation information not found during automatic scan.</p></div>
+          <p id="scan-cancellation-path" class="status"></p>
+        </div>
+
+        <div id="scan-manual-note" class="scan-note" hidden></div>
+
+        <details class="more-details">
+          <summary>View scanned pages</summary>
+          <ul id="scan-pages" class="scan-pages"></ul>
+        </details>
+      </section>
+
+      <details id="trial-details" class="details">
+        <summary>View detailed page analysis</summary>
         <p id="analysis-status" class="status">Analyzing page…</p>
         <dl id="details-list"></dl>
-      </section>
+      </details>
     </main>
 
     <script src="popup.js"></script>
