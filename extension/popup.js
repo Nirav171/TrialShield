@@ -5,18 +5,10 @@ const resultCount = document.querySelector("#result-count");
 const details = document.querySelector("#trial-details");
 const analysisStatus = document.querySelector("#analysis-status");
 const detailsList = document.querySelector("#details-list");
-const siteScanStatus = document.querySelector("#site-scan-status");
-const siteScanStart = document.querySelector("#site-scan-start");
-const scanCountDiscovered = document.querySelector("#scan-count-discovered");
-const scanCountAnalyzed = document.querySelector("#scan-count-analyzed");
-const scanCountRelevant = document.querySelector("#scan-count-relevant");
-const scanTrialSummary = document.querySelector("#scan-trial-summary");
-const scanPaymentSummary = document.querySelector("#scan-payment-summary");
-const scanRenewalSummary = document.querySelector("#scan-renewal-summary");
-const scanCancellationSummary = document.querySelector("#scan-cancellation-summary");
-const scanCancellationPath = document.querySelector("#scan-cancellation-path");
-const scanManualNote = document.querySelector("#scan-manual-note");
-const scanPages = document.querySelector("#scan-pages");
+const protectTrialButton = document.querySelector("#protect-trial");
+const protectionStatus = document.querySelector("#protection-status");
+let analyzedTrial = null;
+let analyzedRiskScore = 0;
 
 function renderResults(items, query) {
   results.replaceChildren();
@@ -34,9 +26,11 @@ function renderResults(items, query) {
     name.textContent = trial.name;
     note.textContent = trial.description;
     link.append(name, note);
-    link.addEventListener("click", (event) => {
+    link.addEventListener("click", async (event) => {
       event.preventDefault();
-      chrome.tabs.update({ url: trial.url });
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) return;
+      await chrome.tabs.update(tab.id, { url: trial.url });
       window.close();
     });
     item.append(link);
@@ -56,7 +50,7 @@ form.addEventListener("submit", async (event) => {
   const button = form.querySelector("button");
   button.disabled = true;
   button.textContent = "Searching...";
-  resultCount.textContent = "Searching current free-trial offers available in India...";
+  resultCount.textContent = "Searching current free-trial offers...";
   results.replaceChildren();
 
   try {
@@ -87,11 +81,106 @@ function addDetail(label, value) {
   detailsList.append(term, description);
 }
 
-async function analyzeActivePage() {
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = typeof payload?.detail === "string"
+      ? payload.detail
+      : Array.isArray(payload?.detail)
+        ? payload.detail.map((item) => item.msg).join("; ")
+        : "FastAPI request failed";
+    throw new Error(detail);
+  }
+  return payload;
+}
+
+function renderBackendAnalysis(state) {
+  details.hidden = false;
+  detailsList.replaceChildren();
+  analyzedTrial = null;
+  analyzedRiskScore = 0;
+  protectTrialButton.hidden = true;
+  protectionStatus.textContent = "";
+
+  if (!state || state.status === "waiting") {
+    analysisStatus.textContent = "Waiting for the selected website to load...";
+    return;
+  }
+  if (state.status === "analyzing") {
+    analysisStatus.textContent = "FastAPI is analyzing the selected website...";
+    return;
+  }
+  if (state.status === "error") {
+    analysisStatus.textContent = `Analysis failed: ${state.error}. Make sure FastAPI is running.`;
+    return;
+  }
+
+  const payload = state.result;
+  const trial = payload.trial;
+  analyzedTrial = trial;
+  analyzedRiskScore = payload.risk?.score || 0;
+  protectTrialButton.hidden = false;
+  analysisStatus.textContent = payload.risk
+    ? `Risk: ${payload.risk.score}/100 (${payload.risk.level}). ${payload.risk.summary}`
+    : "Analysis complete.";
+  addDetail("Provider", trial.provider_name);
+  addDetail("Free trial", trial.has_free_trial ? "Yes" : "Not confirmed");
+  addDetail("Starts", trial.trial_start);
+  addDetail("Duration", trial.trial_duration);
+  addDetail("Starting fee", trial.minimum_fee);
+  addDetail("Recurring charge", trial.recurring_charge);
+  addDetail("Payment method required", trial.payment_method_required);
+  addDetail("Auto-renewal", trial.auto_renews);
+  addDetail("Cancellation terms", trial.cancellation_terms);
+  addDetail("Completeness", `${payload.completeness_score}%`);
+  addDetail("Warnings", payload.warnings);
+  addDetail("Risk factors", payload.risk?.factors?.map((factor) => `${factor.label} (+${factor.points})`));
+  addDetail("Evidence", trial.evidence);
+}
+
+protectTrialButton.addEventListener("click", async () => {
+  if (!analyzedTrial) return;
+
+  protectTrialButton.disabled = true;
+  protectTrialButton.textContent = "Starting protection...";
+  protectionStatus.textContent = "Sending trial details to FastAPI...";
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error("The selected website tab is unavailable");
+
+    const response = await chrome.runtime.sendMessage({
+      type: "TRIALSHIELD_PROTECT_TRIAL",
+      tabId: tab.id,
+      riskScore: analyzedRiskScore
+    });
+    if (!response?.ok) throw new Error(response?.error || "Trial protection failed");
+
+    const result = response.result;
+    addDetail("Simulated card number", result.card.card_number);
+    addDetail("Expiry", `${String(result.card.expiry_month).padStart(2, "0")}/${result.card.expiry_year}`);
+    addDetail("Simulated CVV", result.card.cvv);
+    addDetail("Merchant lock", result.card.merchant_lock);
+    addDetail("Card status", result.card.status);
+    protectionStatus.textContent = result.message;
+    protectTrialButton.textContent = "TrialShield protection started";
+  } catch (error) {
+    protectionStatus.textContent = error instanceof Error ? error.message : "Trial protection failed";
+    protectTrialButton.disabled = false;
+    protectTrialButton.textContent = "Protect this trial";
+  }
+});
+
+async function loadActivePageAnalysis() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id || !/^https?:/.test(tab.url || "")) return;
-
   details.hidden = false;
+  analysisStatus.textContent = "Analyzing this page with FastAPI...";
   try {
     let response;
     try {
@@ -100,223 +189,31 @@ async function analyzeActivePage() {
       // No content script listening yet - this happens on tabs that were
       // already open before the extension was installed/reloaded. Inject it
       // now (permission already granted via "scripting") and retry once.
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["scanner.js", "content.js"] });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
       response = await chrome.tabs.sendMessage(tab.id, { type: "TRIALSHIELD_ANALYZE" });
     }
     if (!response?.ok) throw new Error(response?.error || "Analysis unavailable");
     const trial = response.trial;
-    analysisStatus.textContent = trial.has_free_trial
-      ? "Possible free-trial terms detected. Verify them on the provider's checkout page."
-      : "No clear free-trial terms were detected on this page.";
-    addDetail("Provider", trial.provider_name);
-    addDetail("Starts", trial.trial_start);
-    addDetail("Duration", trial.trial_duration);
-    addDetail("Starting fee", trial.minimum_fee);
-    addDetail("Payment method required", trial.payment_method_required);
-    addDetail("Auto-renewal", trial.auto_renews);
-    addDetail("Cancellation terms", trial.cancellation_terms);
-    addDetail("Evidence", trial.evidence);
-  } catch {
-    analysisStatus.textContent = "This page can't be analyzed (browser-restricted page or extension store page).";
+    const [pageAnalysis, risk] = await Promise.all([
+      postJson("http://127.0.0.1:8000/analyze-page", trial),
+      postJson("http://127.0.0.1:8000/risk-score", trial)
+    ]);
+    renderBackendAnalysis({
+      status: "complete",
+      result: { ...pageAnalysis, risk }
+    });
+  } catch (error) {
+    const message = error instanceof TypeError
+      ? "FastAPI backend is offline. Start it on port 8000 and try again."
+      : error instanceof Error
+        ? error.message
+        : "This page could not be analyzed.";
+    renderBackendAnalysis({ status: "error", error: message });
   }
 }
 
-function hostnameFromUrl(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return null;
-  }
-}
-
-function pathnameFor(url) {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.pathname || "/"}${parsed.search || ""}`;
-  } catch {
-    return url;
-  }
-}
-
-function openPage(url) {
-  if (!url) return;
-  chrome.tabs.update({ url }).catch(() => {});
-  window.close();
-}
-
-function findFirstFinding(state, predicate) {
-  return (state?.analyzedPages || [])
-    .slice()
-    .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .find((page) => predicate(page.websiteAnalysis?.findings || {})) || null;
-}
-
-function renderFindingValue(element, text, sourcePage = null, kind = "neutral") {
-  element.replaceChildren();
-  element.className = `finding-value finding-${kind}`;
-  const line = document.createElement("span");
-  line.textContent = text;
-  element.append(line);
-  if (sourcePage?.url) {
-    const source = document.createElement("button");
-    source.type = "button";
-    source.className = "source-link";
-    source.textContent = `Found on ${pathnameFor(sourcePage.url)}`;
-    source.addEventListener("click", () => openPage(sourcePage.url));
-    element.append(source);
-  }
-}
-
-function renderWebsiteScan(state) {
-  if (!state) {
-    siteScanStatus.textContent = "Waiting for scan data…";
-    scanCountDiscovered.textContent = "0 pages discovered";
-    scanCountAnalyzed.textContent = "0 analyzed";
-    scanCountRelevant.textContent = "0 relevant";
-    renderFindingValue(scanTrialSummary, "No trial information yet.");
-    renderFindingValue(scanPaymentSummary, "No payment information yet.");
-    renderFindingValue(scanRenewalSummary, "No renewal information yet.");
-    renderFindingValue(scanCancellationSummary, "Cancellation information not found during automatic scan.");
-    scanCancellationPath.textContent = "";
-    scanManualNote.hidden = true;
-    scanPages.replaceChildren();
-    return;
-  }
-
-  const discovered = state.summary?.discoveredCount ?? state.discoveredPages?.length ?? 0;
-  const analyzed = state.summary?.analyzedCount ?? state.analyzedPages?.length ?? 0;
-  const relevant = state.summary?.relevantCount ?? state.analyzedPages?.filter((page) => {
-    const f = page.websiteAnalysis?.findings || {};
-    return (page.score || 0) >= 20 || f.trial?.detected || f.payment?.pageDetected || f.payment?.required === true || f.renewal?.automatic === true || f.cancellation?.detected || f.subscription?.detected;
-  }).length ?? 0;
-
-  scanCountDiscovered.textContent = `${discovered} page${discovered === 1 ? "" : "s"} discovered`;
-  scanCountAnalyzed.textContent = `${analyzed} analyzed`;
-  scanCountRelevant.textContent = `${relevant} relevant`;
-
-  if (state.scanStatus === "scanning") siteScanStatus.textContent = "Scanning…";
-  else if (state.scanStatus === "partial") siteScanStatus.textContent = "Partial scan";
-  else if (state.scanStatus === "complete") siteScanStatus.textContent = "Scan complete";
-  else siteScanStatus.textContent = "Scan ready";
-
-  const trialPage = findFirstFinding(state, (f) => f.trial?.detected);
-  const paymentPage = findFirstFinding(state, (f) => f.payment?.pageDetected || f.payment?.required === true);
-  const renewalPage = findFirstFinding(state, (f) => f.renewal?.automatic === true);
-  const cancellationPage = findFirstFinding(state, (f) => f.cancellation?.detected);
-
-  if (trialPage) {
-    const trial = trialPage.websiteAnalysis.findings.trial;
-    const duration = trial.duration ? ` · ${trial.duration}` : "";
-    renderFindingValue(scanTrialSummary, `✓ ${trial.duration ? trial.duration : "Trial detected"}`, trialPage, "ok");
-  } else {
-    renderFindingValue(scanTrialSummary, "No clear trial found on analyzed pages.");
-  }
-
-  if (paymentPage) {
-    const payment = paymentPage.websiteAnalysis.findings.payment;
-    const price = payment.subscriptionPrice ? ` · ${payment.subscriptionPrice}` : "";
-    const text = payment.required === true ? `⚠ Payment required${price}` : `Payment page found${price}`;
-    renderFindingValue(scanPaymentSummary, text, paymentPage, payment.required === true ? "warning" : "neutral");
-  } else {
-    renderFindingValue(scanPaymentSummary, "No payment finding on analyzed pages.");
-  }
-
-  if (renewalPage) {
-    const renewal = renewalPage.websiteAnalysis.findings.renewal;
-    renderFindingValue(scanRenewalSummary, renewal.price ? `⚠ ${renewal.price}` : "⚠ Automatic renewal detected", renewalPage, "warning");
-  } else {
-    renderFindingValue(scanRenewalSummary, "No automatic-renewal finding on analyzed pages.");
-  }
-
-  const cancellation = state.summary?.cancellation;
-  if (cancellation?.found) {
-    const steps = cancellation.stepsObserved || 0;
-    renderFindingValue(scanCancellationSummary, `✓ Found · ${steps} step${steps === 1 ? "" : "s"} observed`, cancellationPage, "ok");
-  } else {
-    renderFindingValue(scanCancellationSummary, "Cancellation information not found during automatic scan.");
-  }
-
-  scanCancellationPath.textContent = cancellation?.path?.length
-    ? `Observed path: ${cancellation.path.map(pathnameFor).join(" → ")}`
-    : cancellation?.found
-      ? "Cancellation was observed, but no multi-page path could be established from discovered links."
-      : "This does not mean cancellation is unavailable; protected, dynamic, or unvisited pages may still contain it.";
-
-  const manualPages = state.summary?.manualVisitRequired || [];
-  const failedPages = state.failedPages || [];
-  if (manualPages.length || failedPages.length) {
-    scanManualNote.hidden = false;
-    scanManualNote.textContent = `Some pages were not fully scannable: ${manualPages.length} require manual visit${manualPages.length === 1 ? "" : "s"}${failedPages.length ? `, ${failedPages.length} could not be accessed` : ""}.`;
-  } else {
-    scanManualNote.hidden = true;
-  }
-
-  scanPages.replaceChildren();
-  const pagesToShow = (state.analyzedPages || [])
-    .slice()
-    .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .slice(0, 20);
-
-  for (const page of pagesToShow) {
-    const item = document.createElement("li");
-    item.className = "scan-page";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "scan-page-button";
-    const title = document.createElement("strong");
-    const meta = document.createElement("span");
-    const finding = document.createElement("span");
-    const analysis = page.websiteAnalysis;
-    const f = analysis?.findings || {};
-    const tags = [];
-    if (f.trial?.detected) tags.push("Trial");
-    if (f.payment?.pageDetected || f.payment?.required === true) tags.push("Payment");
-    if (f.renewal?.automatic === true) tags.push("Renewal");
-    if (f.cancellation?.detected) tags.push("Cancellation");
-    if (analysis?.requiresManualVisit) tags.push("Manual visit");
-    title.textContent = page.title || pathnameFor(page.url);
-    meta.textContent = pathnameFor(page.url);
-    finding.textContent = tags.length ? tags.join(" · ") : "No relevant subscription signal found";
-    button.append(title, meta, finding);
-    button.addEventListener("click", () => openPage(page.url));
-    item.append(button);
-    scanPages.append(item);
-  }
-}
-
-async function loadWebsiteScan(tab) {
-  if (!tab?.url || !/^https?:/.test(tab.url)) {
-    renderWebsiteScan(null);
-    siteScanStart.disabled = true;
-    return;
-  }
-  siteScanStart.disabled = false;
-  const hostname = hostnameFromUrl(tab.url);
-  const key = `trialshield_scanner:${hostname}`;
-  const stored = await chrome.storage.local.get(key).catch(() => ({}));
-  renderWebsiteScan(stored[key] || null);
-
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local" && changes[key]) renderWebsiteScan(changes[key].newValue || null);
-  });
-}
-
-siteScanStart.addEventListener("click", async () => {
-  siteScanStart.disabled = true;
-  siteScanStatus.textContent = "Scanning…";
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) {
-    chrome.runtime.sendMessage({ type: "TRIALSHIELD_SCANNER_START", tabId: tab.id, url: tab.url }).catch(() => {});
-  }
-  setTimeout(() => { siteScanStart.disabled = false; }, 900);
-});
-
-resultCount.textContent = "Search for music, design, fitness, streaming, or another service available in India.";
-(async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  await loadWebsiteScan(tab);
-  await analyzeActivePage();
-})();
+resultCount.textContent = "Search for music, design, fitness, streaming, or another service.";
+loadActivePageAnalysis();
 
 // ---------------------------------------------------------------------------
 // TrialShield monitoring dashboard (Phase 3)

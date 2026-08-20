@@ -1,26 +1,93 @@
 # TrialShield
 
-## Run locally
+TrialShield is a local hackathon demo that analyzes trial terms and creates a
+simulated merchant-locked card record. It does not create real payment cards or
+provide real payment-network protection.
 
-1. Start the search service with `powershell -ExecutionPolicy Bypass -File .\backend.ps1`.
-2. Open `chrome://extensions`, enable Developer mode, and choose **Load unpacked**.
-3. Select this directory and reload the extension after changing its files.
+## Run the FastAPI backend
 
-The Gemini key is read only by the local PowerShell service from `.env`; it is not
-packaged into the Chrome extension. Search requests use Gemini with Google
-Search grounding and return five official free-trial pages.
+1. Install Python 3.12 or newer.
+2. From the repository root, install the dependencies:
 
-Searches are cached for 30 minutes to reduce Gemini requests. Temporary 429 and
-5xx responses use exponential backoff, with `gemini-3.5-flash-lite` as the
-primary model and `gemini-2.5-flash` as a fallback.
+   ```powershell
+   py -m pip install -r requirements.txt
+   ```
 
-If the separate Google Search grounding quota is exhausted, the backend falls
-back to an ungrounded Gemini result instead of returning a 429. The page
-analyzer should still be used to verify the provider's current trial terms.
+3. Start FastAPI from the backend directory:
 
-### Port already in use
+   ```powershell
+   Set-Location .\Backend
+   py -m uvicorn main:app --reload
+   ```
 
-Only one backend can listen on port 8787. Stop the older terminal with
-`Ctrl+C`, or use the exact `Stop-Process -Id <PID>` command printed by the new
-backend. Then start `backend.ps1` again. If no PID is shown, wait a few seconds
-for Windows to release the socket and retry.
+4. Open <http://127.0.0.1:8000/docs> to inspect and try the API routes.
+
+The cleaned models use `Backend/trialshield.db`. The older `database.db` and
+`database.backup.db` files are left untouched because they use an incompatible
+schema from an earlier prototype.
+
+## Run the existing search service
+
+In a second PowerShell window, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\extension\backend.ps1
+```
+
+It continues to serve `POST http://127.0.0.1:8787/search`. Its Gemini key stays
+in the local `.env` file and is not included in the extension.
+
+## Load the Chrome extension
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Choose **Load unpacked** and select the `extension` directory.
+4. Reload the extension after changing its files.
+
+The popup keeps search on port `8787`. For the active webpage, it sends the
+structured object from `content.js` to FastAPI's `/analyze-page` and
+`/risk-score` routes. The **Protect this trial** button calls `/protect-trial`
+and displays the returned simulated card details.
+
+## Test `/protect-trial`
+
+With FastAPI running, execute this from the repository root:
+
+```powershell
+$body = @{
+  provider_name = "Example Stream"
+  source_url = "https://www.example.com/free-trial"
+  trial_duration = "14 days"
+  renewal_amount = "₹999/month"
+  currency = "INR"
+  billing_frequency = "monthly"
+  risk_score = 62
+  evidence = @(
+    "Start a 14-day free trial."
+    "Renews for ₹999/month unless cancelled."
+  )
+} | ConvertTo-Json
+
+$protected = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/protect-trial `
+  -ContentType "application/json" `
+  -Body $body
+
+$protected
+Invoke-RestMethod "http://127.0.0.1:8000/trials/$($protected.trial_id)/audit-events"
+```
+
+The request creates one merchant (or reuses it by domain), one trial, one
+simulated card, and `PROTECTION_ENABLED` plus `CARD_CREATED` audit events.
+
+To test the payment fallback without claiming cancellation:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/trials/$($protected.trial_id)/freeze-card"
+```
+
+The response always says: “Payment method frozen as fallback. Cancellation is
+not confirmed.”

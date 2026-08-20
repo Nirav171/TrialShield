@@ -1,35 +1,21 @@
 {
   "manifest_version": 3,
   "name": "TrialShield",
-  "version": "0.4.0",
-  "description": "Find India-available free trials and inspect their terms before signing up.",
-  "permissions": [
-    "activeTab",
-    "storage",
-    "tabs",
-    "scripting"
-  ],
-  "host_permissions": [
-    "<all_urls>",
-    "http://127.0.0.1:8787/*"
-  ],
+  "version": "0.1.0",
+  "description": "Find free trials and inspect their terms before signing up.",
+  "permissions": ["activeTab", "storage", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:8787/*", "http://127.0.0.1:8000/*"],
   "action": {
     "default_title": "TrialShield",
     "default_popup": "popup.html"
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "serviceworker.js"
   },
   "content_scripts": [
     {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "js": [
-        "scanner.js",
-        "content.js"
-      ],
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
       "run_at": "document_idle"
     }
   ]

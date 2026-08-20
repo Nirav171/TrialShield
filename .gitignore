@@ -1,0 +1,7 @@
+# Local secrets and Python build/runtime artifacts.
+.env
+__pycache__/
+*.py[cod]
+
+# Local SQLite database files are runtime data, not source.
+Backend/*.db
