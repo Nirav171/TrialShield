@@ -21,6 +21,27 @@ if (-not $env:GEMINI_API_KEY) {
     throw 'GEMINI_API_KEY is missing from .env'
 }
 
+function Get-ValidatedGeminiApiKey {
+    param([string]$RawValue)
+
+    $apiKey = ''
+    if ($null -ne $RawValue) { $apiKey = $RawValue.Trim().Trim('"').Trim("'") }
+
+    if (-not $apiKey) {
+        throw 'GEMINI_API_KEY is empty in .env'
+    }
+    if ($apiKey -match '^\s*Bearer\s+' -or $apiKey -match '^ya29\.') {
+        throw 'GEMINI_API_KEY must be a Google AI Studio API key, not an OAuth/Bearer access token. Create an API key in Google AI Studio and put only that key in extension\.env.'
+    }
+    if ($apiKey -notmatch '^AIza[0-9A-Za-z_-]+$') {
+        throw 'GEMINI_API_KEY does not look like a Google AI Studio API key. Create an API key in Google AI Studio and put it in extension\.env as GEMINI_API_KEY=your_key_here.'
+    }
+
+    return $apiKey
+}
+
+$env:GEMINI_API_KEY = Get-ValidatedGeminiApiKey $env:GEMINI_API_KEY
+
 function Send-JsonResponse {
     param($Stream, [int]$Status, $Payload)
     $body = $Payload | ConvertTo-Json -Depth 10 -Compress

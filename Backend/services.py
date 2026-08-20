@@ -46,16 +46,24 @@ def parse_trial_days(trial_duration: str | None) -> int:
     return amount
 
 
-def parse_amount(value: str | None) -> float:
-    """Extract the first non-negative decimal amount from display text."""
+def parse_amount(value: str | None) -> float | None:
+    """Extract a currency amount from display text."""
 
-    match = re.search(r"\d[\d,]*(?:\.\d+)?", value or "")
-    if not match:
-        return 0.0
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return 0.0
+    if not value:
+        return None
+
+    patterns = [
+        r"(?:₹|Rs\.?|INR)\s*(\d[\d,]*(?:\.\d+)?)",
+        r"(\d[\d,]*(?:\.\d+)?)\s*(?:rupees|INR)",
+        r"(?:\$|€|£)\s*(\d[\d,]*(?:\.\d+)?)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, value, re.IGNORECASE)
+        if match:
+            return float(match.group(1).replace(",", ""))
+
+    return None
 
 
 def _passes_luhn_check(number: str) -> bool:
@@ -98,31 +106,6 @@ def generate_cvv() -> str:
     return f"{secrets.randbelow(1000):03d}"
 
 
-def create_virtual_card(
-    db: Session,
-    trial: Trial,
-    merchant_domain: str,
-    spend_limit: float,
-) -> VirtualCard:
-    """Create and flush a merchant-locked simulated card for one trial."""
-
-    now = datetime.now(UTC)
-    card = VirtualCard(
-        trial_id=trial.id,
-        card_number=generate_card_number(db),
-        expiry_month=now.month,
-        expiry_year=now.year + 3,
-        cvv=generate_cvv(),
-        merchant_lock=merchant_domain,
-        balance=0.0,
-        spend_limit=max(0.0, spend_limit),
-        status="active",
-    )
-    db.add(card)
-    db.flush()
-    return card
-
-
 def log_event(
     db: Session,
     trial_id: int,
@@ -146,6 +129,7 @@ def log_event(
     except SQLAlchemyError:
         db.rollback()
         raise
+
 
 
 def create_protected_trial(
